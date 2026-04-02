@@ -1,0 +1,1519 @@
+
+
+
+UniReserve
+University Facility Reservation System
+Product Requirements Document
+Version 1.0  ·  Full System Specification
+Tech Stack
+Django REST · React · MySQL
+Document Status
+Final Draft
+Target Audience
+Developers · Examiners · Stakeholders
+
+1. Introduction & Project Overview
+1.1 Purpose
+UniReserve is a university facility reservation platform designed to eliminate the chaos of unmanaged academic spaces. Students book study rooms, library seats, computer labs, and specialized facilities in advance. The system enforces booking rules, prevents overcrowding, manages time slots intelligently, and surfaces smart recommendations powered by usage analytics.
+
+This document defines the complete product requirements: database schema, backend architecture, business logic, API surface, and frontend expectations. It is the single source of truth for the engineering team.
+1.2 Problem Statement
+	•	Students arrive at libraries and labs to find all seats occupied, with no visibility into availability.
+	•	Overcrowding in computer labs and study rooms reduces academic productivity.
+	•	Facility managers have no data on peak usage, wasted slots, or no-shows.
+	•	Administrators cannot enforce fair-use policies without a centralized system.
+	•	There is no waitlist mechanism — students who miss out simply lose access to the resource.
+1.3 Goals & Success Metrics
+Goal
+Success Metric
+Target
+Reduce walk-in overcrowding
+Seats booked in advance / total occupancy
+>80% pre-booked
+Improve slot utilization
+No-show rate
+<10% within 3 months
+Manager visibility
+Analytics dashboard adoption
+100% of managers
+Student satisfaction
+Post-use rating average
+>4.0 / 5.0
+System reliability
+Booking success rate
+>99.5% uptime
+1.4 Scope
+In Scope:
+	•	Role-based authentication (Student, Facility Manager, Super Admin)
+	•	Facility and slot management across 7 facility types
+	•	Core booking engine with conflict prevention and waitlist
+	•	Email notification system via Celery async tasks
+	•	Analytics dashboards for managers and admins
+	•	Recommendation engine based on booking history
+	•	No-show detection and progressive penalty system
+	•	Feedback and ratings module
+
+Out of Scope:
+	•	Mobile native apps (web-responsive only)
+	•	Payment or deposit systems
+	•	Physical access control hardware integration
+	•	Real-time video/audio conferencing in rooms
+
+2. User Roles & Permissions
+2.1 Role Overview
+The system implements three distinct roles with non-overlapping permission surfaces. Role assignment happens at registration time and is enforced at both the API layer (DRF permission classes) and database query layer (queryset filtering).
+
+2.1.1 Student
+The primary user of the system. Students self-register and activate via email verification.
+Permission
+Details
+Book a slot
+Any available slot within booking rules
+Cancel a booking
+Up to 30 minutes before slot start time
+Join waitlist
+Automatic when slot is full
+View booking history
+Own bookings only
+Receive recommendations
+Personalized slot suggestions
+Rate a facility
+After booking completion only
+View live availability
+Real-time color-coded indicators
+
+2.1.2 Facility Manager
+Faculty or staff responsible for one or more facilities. Registration requires Super Admin approval.
+Permission
+Details
+Manage own facilities
+Add, edit, deactivate rooms and seats
+Set slot availability
+Define operating hours, block dates
+Approve/reject bookings
+For lab facilities requiring manual approval
+View facility analytics
+Own facilities only
+See student details
+For bookings in their facility only
+Export reports
+CSV export of usage data
+
+2.1.3 Super Admin
+University authority. Created manually via Django admin panel. Has unrestricted access.
+Permission
+Details
+Manage all users
+Activate, deactivate, change roles
+Approve managers
+Review and approve pending manager registrations
+Manage all facilities
+Override any facility setting
+View global analytics
+Cross-facility, system-wide dashboards
+Configure system rules
+Max bookings/day, max hours/week, penalty thresholds
+Ban users
+Temporary or permanent booking bans
+View audit log
+Full system event history
+2.2 Registration Flows
+2.2.1 Student Registration Flow
+	•	Student submits form: Name, University Email, Student ID, Department, Year, Password.
+	•	Account created with is_active=False, role=STUDENT.
+	•	Verification token generated and stored in EmailVerification table.
+	•	Async Celery task sends verification email with tokenized link.
+	•	Student clicks link → token validated → is_active=True.
+	•	Student can now log in and receive JWT tokens.
+
+2.2.2 Facility Manager Registration Flow
+	•	Faculty submits form: Name, University Email, Employee ID, Department, Facility they manage.
+	•	Account created with is_active=False, role=MANAGER, status=PENDING.
+	•	Super Admin sees pending request in dashboard.
+	•	Admin approves → is_active=True, approval email sent. Admin rejects → rejection email sent.
+	•	Manager can now log in and access their facility dashboard.
+
+2.2.3 Login Flow (All Roles)
+	•	User submits email + password to POST /api/auth/login/.
+	•	Django validates credentials. If inactive → return specific error.
+	•	On success → return access token (15 min) + refresh token (7 days).
+	•	Frontend stores tokens in memory (access) and httpOnly cookie (refresh).
+	•	Each subsequent request includes Authorization: Bearer <access_token>.
+	•	Role extracted from token payload → frontend redirects to role-specific dashboard.
+
+3. Database Schema
+3.1 Schema Design Philosophy
+The schema follows normalization to 3NF with deliberate denormalization in analytics-heavy tables for query performance. All primary keys are UUIDs except where noted. Soft deletes (is_deleted flag) are used throughout so booking history is never lost. All timestamps are UTC.
+
+MySQL 8.0+ is required for UUID functions, JSON columns, and window functions used in analytics queries.
+
+3.2 Core Tables
+3.2.1 users
+Central user table using Django's AbstractUser as base. Extended with role and university-specific fields.
+Column
+Type
+Constraints
+Description
+id
+CHAR(36)
+PK, UUID, DEFAULT uuid()
+Primary key
+email
+VARCHAR(255)
+UNIQUE, NOT NULL
+University email — login identifier
+password
+VARCHAR(255)
+NOT NULL
+Argon2 hashed password
+first_name
+VARCHAR(100)
+NOT NULL
+First name
+last_name
+VARCHAR(100)
+NOT NULL
+Last name
+role
+ENUM
+NOT NULL
+STUDENT | MANAGER | ADMIN
+student_id
+VARCHAR(50)
+NULLABLE, UNIQUE
+Populated for students only
+employee_id
+VARCHAR(50)
+NULLABLE, UNIQUE
+Populated for managers only
+department
+VARCHAR(150)
+NULLABLE
+Academic or admin department
+year_of_study
+TINYINT
+NULLABLE
+Student year: 1–6
+is_active
+BOOLEAN
+DEFAULT FALSE
+False until email/admin verified
+is_banned
+BOOLEAN
+DEFAULT FALSE
+Set by admin for violations
+ban_until
+DATETIME
+NULLABLE
+Temporary ban expiry (NULL = permanent)
+no_show_count
+SMALLINT
+DEFAULT 0
+Incremented by no-show detector
+warning_count
+SMALLINT
+DEFAULT 0
+Warnings before ban
+profile_picture
+VARCHAR(500)
+NULLABLE
+URL to uploaded image
+last_login
+DATETIME
+NULLABLE
+Auto-updated on JWT issue
+created_at
+DATETIME
+DEFAULT NOW()
+Account creation time
+updated_at
+DATETIME
+ON UPDATE NOW()
+Last modification
+is_deleted
+BOOLEAN
+DEFAULT FALSE
+Soft delete flag
+
+3.2.2 email_verifications
+Column
+Type
+Constraints
+Description
+id
+CHAR(36)
+PK, UUID
+Primary key
+user_id
+CHAR(36)
+FK → users.id, CASCADE DELETE
+Owning user
+token
+CHAR(64)
+UNIQUE, NOT NULL
+SHA-256 hex token
+token_type
+ENUM
+NOT NULL
+EMAIL_VERIFY | PASSWORD_RESET
+expires_at
+DATETIME
+NOT NULL
+Token expiry (24h for verify, 1h for reset)
+used_at
+DATETIME
+NULLABLE
+Set when token consumed
+created_at
+DATETIME
+DEFAULT NOW()
+Creation time
+
+3.2.3 facilities
+Represents a bookable space or set of resources (a room, a lab, a library section).
+Column
+Type
+Constraints
+Description
+id
+CHAR(36)
+PK, UUID
+Primary key
+name
+VARCHAR(200)
+NOT NULL
+e.g. "Central Library — Section A"
+facility_type
+ENUM
+NOT NULL
+LIBRARY_SEAT | STUDY_ROOM | COMPUTER_LAB | DISCUSSION_ROOM | SEMINAR_HALL | MUSIC_ROOM | PRINTING_LAB
+description
+TEXT
+NULLABLE
+Rich text description
+building
+VARCHAR(150)
+NOT NULL
+Building name or code
+floor
+VARCHAR(20)
+NULLABLE
+Floor identifier
+room_number
+VARCHAR(30)
+NULLABLE
+Room number
+total_capacity
+SMALLINT
+NOT NULL
+Max simultaneous users
+requires_approval
+BOOLEAN
+DEFAULT FALSE
+TRUE for labs, seminar halls
+min_group_size
+TINYINT
+DEFAULT 1
+Min people required (group rooms = 2)
+max_booking_duration_mins
+SMALLINT
+DEFAULT 120
+Max single booking length
+slot_duration_mins
+SMALLINT
+DEFAULT 60
+Granularity of time slots
+images
+JSON
+NULLABLE
+Array of image URLs
+amenities
+JSON
+NULLABLE
+e.g. ["whiteboard","projector","AC"]
+manager_id
+CHAR(36)
+FK → users.id, SET NULL
+Responsible manager
+is_active
+BOOLEAN
+DEFAULT TRUE
+False = hidden from students
+created_at
+DATETIME
+DEFAULT NOW()
+
+updated_at
+DATETIME
+ON UPDATE NOW()
+
+is_deleted
+BOOLEAN
+DEFAULT FALSE
+Soft delete
+
+3.2.4 facility_slots
+Defines recurring availability windows for a facility. Each slot is a time block on a given day. Actual bookings reference slots, not the facility directly.
+Column
+Type
+Constraints
+Description
+id
+CHAR(36)
+PK, UUID
+Primary key
+facility_id
+CHAR(36)
+FK → facilities.id, CASCADE DELETE
+Owning facility
+slot_date
+DATE
+NOT NULL
+The calendar date of this slot
+start_time
+TIME
+NOT NULL
+Slot start time (e.g. 09:00)
+end_time
+TIME
+NOT NULL
+Slot end time (e.g. 10:00)
+available_capacity
+SMALLINT
+NOT NULL
+Seats available in this slot
+booked_count
+SMALLINT
+DEFAULT 0
+Denormalized count for fast availability checks
+is_blocked
+BOOLEAN
+DEFAULT FALSE
+Manager can block a slot (holiday, maintenance)
+block_reason
+VARCHAR(255)
+NULLABLE
+Reason for blocking
+created_at
+DATETIME
+DEFAULT NOW()
+
+UNIQUE constraint: (facility_id, slot_date, start_time) — prevents duplicate slot generation.
+
+3.2.5 bookings
+The central transactional table. Every reservation lives here. Immutable once confirmed — cancellations create a status change, not deletion.
+Column
+Type
+Constraints
+Description
+id
+CHAR(36)
+PK, UUID
+Primary key
+student_id
+CHAR(36)
+FK → users.id, RESTRICT
+Booking owner
+facility_id
+CHAR(36)
+FK → facilities.id, RESTRICT
+Booked facility
+slot_id
+CHAR(36)
+FK → facility_slots.id, RESTRICT
+Booked time slot
+booking_reference
+CHAR(12)
+UNIQUE, NOT NULL
+Human-readable ref e.g. "UNI-KX7P2Q"
+status
+ENUM
+NOT NULL
+PENDING | CONFIRMED | CANCELLED | COMPLETED | NO_SHOW
+seat_number
+SMALLINT
+NULLABLE
+Specific seat if assigned (labs, library)
+group_size
+TINYINT
+DEFAULT 1
+Number of people for group rooms
+group_members
+JSON
+NULLABLE
+Array of student IDs in group booking
+purpose
+VARCHAR(300)
+NULLABLE
+Student-stated purpose of booking
+approval_status
+ENUM
+DEFAULT NULL
+PENDING | APPROVED | REJECTED (for requires_approval facilities)
+approved_by
+CHAR(36)
+FK → users.id, NULLABLE
+Manager who approved/rejected
+approved_at
+DATETIME
+NULLABLE
+Approval timestamp
+rejection_reason
+VARCHAR(500)
+NULLABLE
+Manager rejection note
+checked_in_at
+DATETIME
+NULLABLE
+Check-in timestamp (for no-show detection)
+cancelled_at
+DATETIME
+NULLABLE
+Cancellation timestamp
+cancellation_reason
+VARCHAR(500)
+NULLABLE
+Optional cancel reason
+created_at
+DATETIME
+DEFAULT NOW()
+Booking creation time
+updated_at
+DATETIME
+ON UPDATE NOW()
+
+INDEX: (student_id, slot_id) — prevents double booking. INDEX: (facility_id, status) — powers availability queries. INDEX: (slot_id, status) — powers waitlist promotion.
+
+3.2.6 waitlist
+Column
+Type
+Constraints
+Description
+id
+CHAR(36)
+PK, UUID
+Primary key
+student_id
+CHAR(36)
+FK → users.id, CASCADE DELETE
+Waiting student
+facility_id
+CHAR(36)
+FK → facilities.id, CASCADE DELETE
+Target facility
+slot_id
+CHAR(36)
+FK → facility_slots.id, CASCADE DELETE
+Target slot
+position
+SMALLINT
+NOT NULL
+Queue position (1 = next in line)
+status
+ENUM
+NOT NULL
+WAITING | PROMOTED | EXPIRED | REMOVED
+joined_at
+DATETIME
+DEFAULT NOW()
+When student joined the queue
+promoted_at
+DATETIME
+NULLABLE
+When student was auto-promoted
+expires_at
+DATETIME
+NOT NULL
+Waitlist entry auto-expires if slot date passes
+UNIQUE constraint: (student_id, slot_id) — a student can only appear once per slot in the waitlist.
+
+3.2.7 booking_rules
+Global or facility-specific rule configuration. Admin can override per facility.
+Column
+Type
+Constraints
+Description
+id
+INT
+PK, AUTO_INCREMENT
+Primary key
+facility_id
+CHAR(36)
+FK → facilities.id NULLABLE
+NULL = global rule
+rule_key
+VARCHAR(100)
+NOT NULL
+e.g. MAX_BOOKINGS_PER_DAY
+rule_value
+VARCHAR(100)
+NOT NULL
+e.g. "3"
+description
+VARCHAR(300)
+NULLABLE
+Human-readable explanation
+is_active
+BOOLEAN
+DEFAULT TRUE
+
+updated_by
+CHAR(36)
+FK → users.id
+Admin who last changed this rule
+updated_at
+DATETIME
+ON UPDATE NOW()
+
+Rule keys include: MAX_BOOKINGS_PER_DAY, MAX_HOURS_PER_WEEK, MIN_ADVANCE_BOOKING_MINS, MAX_ADVANCE_BOOKING_DAYS, CANCELLATION_WINDOW_MINS, NO_SHOW_BAN_THRESHOLD, NO_SHOW_CHECKIN_GRACE_MINS.
+
+3.2.8 notifications
+Column
+Type
+Constraints
+Description
+id
+CHAR(36)
+PK, UUID
+
+user_id
+CHAR(36)
+FK → users.id, CASCADE DELETE
+Recipient
+notification_type
+ENUM
+NOT NULL
+BOOKING_CONFIRMED | BOOKING_CANCELLED | WAITLIST_PROMOTED | REMINDER | BOOKING_APPROVED | BOOKING_REJECTED | BAN_WARNING | NO_SHOW_RECORDED
+title
+VARCHAR(255)
+NOT NULL
+Short notification title
+body
+TEXT
+NOT NULL
+Full notification message
+related_booking_id
+CHAR(36)
+FK → bookings.id, NULLABLE
+Associated booking
+is_read
+BOOLEAN
+DEFAULT FALSE
+
+sent_via_email
+BOOLEAN
+DEFAULT FALSE
+Whether email was dispatched
+email_sent_at
+DATETIME
+NULLABLE
+
+created_at
+DATETIME
+DEFAULT NOW()
+
+
+3.2.9 feedback
+Column
+Type
+Constraints
+Description
+id
+CHAR(36)
+PK, UUID
+
+booking_id
+CHAR(36)
+FK → bookings.id, RESTRICT, UNIQUE
+One review per booking
+student_id
+CHAR(36)
+FK → users.id, RESTRICT
+
+facility_id
+CHAR(36)
+FK → facilities.id, RESTRICT
+
+cleanliness_rating
+TINYINT
+CHECK (1-5)
+
+equipment_rating
+TINYINT
+CHECK (1-5)
+
+experience_rating
+TINYINT
+CHECK (1-5)
+
+overall_rating
+DECIMAL(3,2)
+COMPUTED
+Avg of 3 ratings — stored for index performance
+comment
+TEXT
+NULLABLE
+Optional written review
+is_flagged
+BOOLEAN
+DEFAULT FALSE
+Admin-flagged inappropriate review
+created_at
+DATETIME
+DEFAULT NOW()
+
+
+3.2.10 audit_logs
+Immutable event log for compliance and debugging. Written by a Django signal receiver, never by application code directly.
+Column
+Type
+Constraints
+Description
+id
+BIGINT
+PK, AUTO_INCREMENT
+Sequential for time ordering
+actor_id
+CHAR(36)
+FK → users.id, SET NULL
+Who performed the action
+actor_role
+ENUM
+NOT NULL
+Role at time of action
+action
+VARCHAR(100)
+NOT NULL
+e.g. BOOKING_CREATED, USER_BANNED
+target_type
+VARCHAR(50)
+NULLABLE
+Model name e.g. "Booking"
+target_id
+CHAR(36)
+NULLABLE
+Target object UUID
+payload
+JSON
+NULLABLE
+Before/after state snapshot
+ip_address
+VARCHAR(45)
+NULLABLE
+IPv4 or IPv6
+created_at
+DATETIME
+DEFAULT NOW()
+
+
+3.2.11 analytics_daily_snapshots
+Pre-aggregated daily analytics. A Celery beat task runs nightly at midnight and writes one row per facility per day. This keeps the analytics dashboard fast without complex GROUP BY queries on hot tables at runtime.
+Column
+Type
+Constraints
+Description
+id
+INT
+PK, AUTO_INCREMENT
+
+facility_id
+CHAR(36)
+FK → facilities.id
+
+snapshot_date
+DATE
+NOT NULL
+The day being summarized
+total_bookings
+SMALLINT
+DEFAULT 0
+
+confirmed_bookings
+SMALLINT
+DEFAULT 0
+
+cancelled_bookings
+SMALLINT
+DEFAULT 0
+
+no_show_count
+SMALLINT
+DEFAULT 0
+
+utilization_percent
+DECIMAL(5,2)
+DEFAULT 0.00
+confirmed / total_slots × 100
+peak_hour_start
+TIME
+NULLABLE
+Hour with most bookings
+avg_rating
+DECIMAL(3,2)
+NULLABLE
+Average rating for the day
+unique_students
+SMALLINT
+DEFAULT 0
+Distinct students who booked
+created_at
+DATETIME
+DEFAULT NOW()
+
+
+4. Backend Architecture
+4.1 Django Project Structure
+Each functional domain is a separate Django app. This enforces separation of concerns and makes individual apps independently testable.
+
+Project: unireserve/
+	•	manage.py
+	•	unireserve/ (project root)
+	•	    settings/ (base.py, development.py, production.py)
+	•	    urls.py — root URL config
+	•	    celery.py — Celery application instance
+
+Apps:
+	•	accounts/ — User model, auth, registration, JWT
+	•	facilities/ — Facility CRUD, slot generation, availability
+	•	bookings/ — Booking engine, waitlist, rules enforcement
+	•	notifications/ — Email templates, Celery notification tasks
+	•	analytics/ — Dashboard queries, snapshot tasks, recommendations
+	•	core/ — Shared base models, mixins, custom exceptions, utilities
+
+4.2 App: accounts
+Models: User (AbstractUser extension), EmailVerification, ManagerApprovalRequest
+Key views / endpoints:
+Method
+Endpoint
+Description
+Auth Required
+POST
+/api/auth/register/student/
+Student self-registration
+None
+POST
+/api/auth/register/manager/
+Manager registration (pending approval)
+None
+GET
+/api/auth/verify-email/<token>/
+Email token verification
+None
+POST
+/api/auth/login/
+JWT token pair issue
+None
+POST
+/api/auth/logout/
+Refresh token blacklist
+JWT
+POST
+/api/auth/token/refresh/
+Issue new access token
+Refresh token
+POST
+/api/auth/password-reset/
+Request password reset email
+None
+POST
+/api/auth/password-reset/confirm/
+Confirm reset with token + new pass
+None
+GET/PATCH
+/api/users/me/
+Get / update own profile
+JWT
+GET
+/api/admin/users/
+List all users (paginated)
+Admin
+PATCH
+/api/admin/users/<id>/approve-manager/
+Approve/reject manager
+Admin
+PATCH
+/api/admin/users/<id>/ban/
+Ban / unban user
+Admin
+
+4.3 App: facilities
+Models: Facility, FacilitySlot, BookingRule
+Key views / endpoints:
+Method
+Endpoint
+Description
+Auth Required
+GET
+/api/facilities/
+List all active facilities (filterable)
+JWT
+POST
+/api/facilities/
+Create facility
+Admin / Manager
+GET/PATCH/DELETE
+/api/facilities/<id>/
+CRUD on single facility
+Admin / Manager
+POST
+/api/facilities/<id>/generate-slots/
+Auto-generate slots for date range
+Manager
+GET
+/api/facilities/<id>/slots/
+Get slots with availability for date range
+JWT
+PATCH
+/api/facilities/<id>/slots/<slot_id>/block/
+Block / unblock a slot
+Manager
+GET
+/api/facilities/<id>/availability/
+Live availability summary with color codes
+JWT
+GET/PUT
+/api/facilities/<id>/rules/
+Get / set facility-specific rules
+Admin
+
+Slot Generation Logic:
+When a manager calls generate-slots, the system creates FacilitySlot rows for each day in the requested range. The slot_duration_mins on the Facility determines the granularity. For example, a facility with operating hours 08:00–20:00 and slot_duration_mins=60 generates 12 slot rows per day. The system skips days marked as blocked or outside operating days. This is done as a background Celery task for large date ranges.
+
+4.4 App: bookings
+Models: Booking, Waitlist
+Key views / endpoints:
+Method
+Endpoint
+Description
+Auth Required
+POST
+/api/bookings/
+Create a new booking
+Student
+GET
+/api/bookings/
+List own bookings (student) / all (admin)
+JWT
+GET
+/api/bookings/<id>/
+Booking detail
+Owner / Manager / Admin
+POST
+/api/bookings/<id>/cancel/
+Cancel a booking
+Owner / Admin
+POST
+/api/bookings/<id>/check-in/
+Student check-in (prevents no-show)
+Student
+POST
+/api/bookings/<id>/approve/
+Manager approves pending booking
+Manager
+POST
+/api/bookings/<id>/reject/
+Manager rejects pending booking
+Manager
+POST
+/api/waitlist/
+Join waitlist for a full slot
+Student
+DELETE
+/api/waitlist/<id>/
+Leave waitlist
+Student
+GET
+/api/waitlist/
+Student's current waitlist positions
+Student
+
+Booking Engine — Core Business Logic:
+The booking creation path implements multiple validation layers before committing to the database. Failure at any layer returns a descriptive error response.
+
+	•	Pre-flight checks: Is the student active? Is the student banned? If banned and ban_until is set, has it expired?
+	•	Slot validation: Does the slot exist? Is it in the future? Is it blocked by manager? Is the facility active?
+	•	Conflict check: SELECT COUNT(*) FROM bookings WHERE student_id=X AND slot_id=Y AND status NOT IN (CANCELLED) — must return 0.
+	•	Rule enforcement: Check MAX_BOOKINGS_PER_DAY (count bookings by student for slot_date), check MAX_HOURS_PER_WEEK (sum booking durations for current week), check MIN_ADVANCE_BOOKING_MINS (slot start - now > threshold).
+	•	Group size validation: If facility.min_group_size > 1, validate group_size and group_members array.
+	•	Capacity check (atomic): SELECT available_capacity - booked_count FROM facility_slots WHERE id=Y FOR UPDATE. If result <= 0 → slot full → offer waitlist.
+	•	Write: INSERT into bookings, UPDATE facility_slots.booked_count += 1 in same transaction.
+	•	Post-create: dispatch Celery task to send confirmation email and create Notification record.
+
+The FOR UPDATE lock in step 6 is critical. Without row-level locking, concurrent booking requests can both pass the capacity check and both succeed, creating overbooking. This is the race condition that kills most student-built booking systems.
+
+Waitlist Promotion Logic:
+When a booking is cancelled, a Django signal (post_save on Booking) triggers a Celery task:
+	•	Fetch the cancelled booking's slot_id.
+	•	UPDATE facility_slots SET booked_count = booked_count - 1 WHERE id = slot_id.
+	•	Query waitlist WHERE slot_id = X AND status = WAITING ORDER BY position ASC LIMIT 1.
+	•	If a waitlist entry exists, create a new Booking for that student (same atomic capacity check applies).
+	•	Update waitlist entry: status = PROMOTED, promoted_at = NOW().
+	•	Dispatch notification email to promoted student. They have 30 minutes to confirm (optional enhancement).
+
+No-Show Detection Logic (Celery Beat scheduled task):
+Runs every 5 minutes. For each confirmed booking where slot start time has passed by more than NO_SHOW_CHECKIN_GRACE_MINS and checked_in_at IS NULL:
+	•	Update booking.status = NO_SHOW.
+	•	Increment user.no_show_count.
+	•	If no_show_count >= NO_SHOW_BAN_THRESHOLD: set is_banned = True, ban_until = NOW() + 7 days.
+	•	Create Notification and send ban/warning email.
+	•	Trigger waitlist promotion for the freed slot.
+
+4.5 App: analytics
+Models: AnalyticsDailySnapshot
+Key views / endpoints:
+Method
+Endpoint
+Description
+Auth Required
+GET
+/api/analytics/overview/
+System-wide KPIs
+Admin
+GET
+/api/analytics/facility/<id>/
+Facility usage over date range
+Manager / Admin
+GET
+/api/analytics/heatmap/<id>/
+Hour-of-day × day-of-week usage matrix
+Manager / Admin
+GET
+/api/analytics/peak-hours/
+Peak hours ranked per facility
+Manager / Admin
+GET
+/api/recommendations/
+Student's personalized slot recommendations
+Student
+GET
+/api/analytics/cancellation-rate/
+System / facility cancellation rates
+Admin
+GET
+/api/analytics/facility-ranking/
+Facilities sorted by popularity / rating
+Admin
+
+Recommendation Engine Logic:
+Called when a student loads their dashboard. Returns up to 5 slot suggestions.
+
+	•	Fetch student's last 30 bookings → extract facility_id frequency → top 3 preferred facilities.
+	•	For each preferred facility, get slots for the next 7 days.
+	•	Score each slot: score = (1 - booked_count/available_capacity) × 100 (lower occupancy = higher score).
+	•	Boost score by +20 if slot falls within student's historical preferred hours (computed from past bookings).
+	•	Filter out slots the student has already booked.
+	•	Sort by score descending, return top 5 across all facilities.
+	•	If student has fewer than 5 bookings, fall back to globally least-crowded slots for the next 48 hours.
+
+4.6 Celery Task Registry
+Task Name
+Trigger
+Queue
+Description
+send_booking_confirmation_email
+Post booking create
+emails
+Sends confirmation to student
+send_booking_cancellation_email
+Post cancellation
+emails
+Cancellation notice to student
+send_waitlist_promotion_email
+On waitlist promotion
+emails
+Notifies student of promotion
+send_slot_reminder
+Celery beat, T-60min before slot
+emails
+Reminder email to student
+send_approval_result_email
+On manager approve/reject
+emails
+Approval decision to student
+promote_waitlist_on_cancel
+Signal on booking cancel/no-show
+bookings
+Triggers waitlist promotion
+detect_no_shows
+Celery beat, every 5 min
+system
+Marks no-shows, applies penalties
+generate_daily_snapshot
+Celery beat, midnight
+analytics
+Pre-aggregates daily analytics
+generate_slots_for_facility
+On manager request
+facilities
+Bulk slot row generation
+expire_old_waitlist_entries
+Celery beat, daily
+system
+Expires past-date waitlist entries
+send_manager_approval_request
+On manager registration
+emails
+Notifies admin of pending manager
+
+5. API Design & Response Standards
+5.1 Base Response Format
+All API responses follow a consistent envelope. Success responses:
+
+{
+  "success": true,
+  "data": { ... },
+  "message": "Booking confirmed successfully.",
+  "meta": { "page": 1, "total": 42, "per_page": 20 }
+}
+
+Error responses:
+
+{
+  "success": false,
+  "error": {
+    "code": "SLOT_FULL",
+    "message": "This slot is at full capacity. Would you like to join the waitlist?",
+    "waitlist_available": true
+  }
+}
+
+5.2 Error Code Registry
+Error Code
+HTTP Status
+Description
+INVALID_CREDENTIALS
+401
+Wrong email or password
+ACCOUNT_INACTIVE
+403
+Email not verified or awaiting admin approval
+ACCOUNT_BANNED
+403
+User is banned — includes ban_until in response
+TOKEN_EXPIRED
+401
+JWT access token has expired
+PERMISSION_DENIED
+403
+Role does not have access to this action
+SLOT_NOT_FOUND
+404
+Slot ID does not exist
+SLOT_FULL
+409
+No remaining capacity — offer waitlist
+ALREADY_BOOKED
+409
+Student already has a booking for this slot
+BOOKING_RULE_VIOLATED
+422
+Max bookings/day or hours/week exceeded
+CANCEL_WINDOW_PASSED
+422
+Too late to cancel (within grace period)
+FACILITY_INACTIVE
+404
+Facility not currently accepting bookings
+SLOT_BLOCKED
+422
+Manager has blocked this slot
+ALREADY_ON_WAITLIST
+409
+Student already in waitlist for this slot
+INVALID_GROUP_SIZE
+422
+Group size below facility minimum
+RATE_LIMIT_EXCEEDED
+429
+Too many requests from this client
+5.3 Authentication
+The system uses JSON Web Tokens via djangorestframework-simplejwt. Access tokens expire in 15 minutes. Refresh tokens expire in 7 days and are blacklisted on logout. The token payload includes: user_id, role, email, is_banned, exp. The role field allows the frontend to render the correct dashboard without an extra API call. The is_banned field allows the frontend to gracefully display ban status immediately.
+
+6. Frontend Architecture
+6.1 Technology Stack
+Library / Tool
+Purpose
+React 18
+UI framework
+React Router v6
+Client-side routing with protected route HOCs per role
+React Query (TanStack)
+Server state management, caching, background refetch for live availability
+Axios
+HTTP client with JWT interceptor and auto refresh-token logic
+Chart.js + react-chartjs-2
+Analytics dashboards: line charts, bar charts, heatmaps
+Tailwind CSS
+Utility-first styling
+React Hook Form + Zod
+Form handling and schema validation
+date-fns
+Date formatting and slot calendar computation
+React Hot Toast
+Notification toasts
+
+6.2 Route Structure
+Route
+Component
+Role
+/login
+LoginPage
+All
+/register
+RegisterPage
+All
+/verify-email/:token
+EmailVerifyPage
+All
+/dashboard
+StudentDashboard
+Student
+/facilities
+FacilityBrowserPage
+Student
+/facilities/:id
+FacilityDetailPage
+Student
+/facilities/:id/book
+BookingPage
+Student
+/bookings
+MyBookingsPage
+Student
+/bookings/:id
+BookingDetailPage
+Student
+/waitlist
+MyWaitlistPage
+Student
+/manager/dashboard
+ManagerDashboard
+Manager
+/manager/facilities
+ManagerFacilitiesPage
+Manager
+/manager/facilities/:id/slots
+SlotManagerPage
+Manager
+/manager/bookings
+PendingBookingsPage
+Manager
+/manager/analytics/:id
+FacilityAnalyticsPage
+Manager
+/admin/dashboard
+AdminDashboard
+Admin
+/admin/users
+UserManagementPage
+Admin
+/admin/facilities
+AllFacilitiesPage
+Admin
+/admin/analytics
+GlobalAnalyticsPage
+Admin
+/admin/rules
+BookingRulesPage
+Admin
+
+6.3 Live Availability — Color System
+The facility slot grid shows color-coded indicators. Computed client-side from the availability API response.
+Color
+Label
+Condition
+Green
+Available
+booked_count / available_capacity < 0.5
+Yellow
+Filling fast
+booked_count / available_capacity >= 0.5 AND < 0.85
+Red
+Almost full
+booked_count / available_capacity >= 0.85 AND < 1.0
+Gray
+Full
+booked_count >= available_capacity
+Dark gray
+Blocked
+is_blocked = true
+Blue
+My booking
+Student has a confirmed booking for this slot
+
+6.4 Analytics Dashboard — Chart Specifications
+Chart
+Type
+Data Source
+Audience
+Daily bookings over 30 days
+Line chart
+analytics_daily_snapshots
+Manager + Admin
+Peak hours heatmap
+7×24 grid matrix
+analytics/heatmap/<id>/
+Manager + Admin
+Facility utilization
+Bar chart (% full)
+analytics/facility/<id>/
+Manager + Admin
+Cancellation rate trend
+Area chart
+analytics/cancellation-rate/
+Admin
+Top facilities by bookings
+Horizontal bar
+analytics/facility-ranking/
+Admin
+Student activity trend
+Line chart
+analytics/overview/
+Admin
+No-show rate
+Gauge / donut chart
+analytics/overview/
+Admin
+Rating distribution
+Bar chart (1–5 stars)
+facility detail endpoint
+Manager + Admin
+
+7. Booking Rules Engine — Full Specification
+7.1 Global Default Rules
+Rule Key
+Default Value
+Description
+Configurable By
+MAX_BOOKINGS_PER_DAY
+3
+Max simultaneous-day bookings per student
+Admin
+MAX_HOURS_PER_WEEK
+10
+Max total booking hours per student per week
+Admin
+MIN_ADVANCE_BOOKING_MINS
+30
+Slots must be booked at least 30 min in advance
+Admin
+MAX_ADVANCE_BOOKING_DAYS
+14
+Cannot book more than 14 days ahead
+Admin
+CANCELLATION_WINDOW_MINS
+30
+Must cancel at least 30 min before slot starts
+Admin
+NO_SHOW_CHECKIN_GRACE_MINS
+15
+Minutes after slot start before no-show is triggered
+Admin
+NO_SHOW_BAN_THRESHOLD
+3
+No-shows before temporary ban is applied
+Admin
+NO_SHOW_BAN_DURATION_DAYS
+7
+Duration of temporary booking ban
+Admin
+WARNING_BEFORE_BAN
+2
+Warnings issued before ban (at threshold - 1)
+Admin
+
+7.2 Facility-Specific Rule Overrides
+If a row exists in booking_rules with facility_id set, it overrides the global rule for that specific facility. Example use cases:
+	•	Computer labs: MAX_BOOKINGS_PER_DAY = 1 (only one lab session per day per student).
+	•	Seminar halls: MIN_ADVANCE_BOOKING_MINS = 1440 (must book at least 24 hours in advance).
+	•	Music practice rooms: MAX_HOURS_PER_WEEK = 4 (limited instrument access time).
+	•	3D Printing lab: requires_approval = TRUE, MIN_ADVANCE_BOOKING_MINS = 2880 (48 hours notice for equipment prep).
+
+7.3 Group Booking Rules
+	•	Facilities with min_group_size > 1 require group_members array in the booking request.
+	•	Each member in the group must be a valid active student.
+	•	The booking counts toward the quota of ALL members in the group (not just the requester).
+	•	If any group member has reached their daily limit, the booking is rejected.
+	•	Cancellation by the requester cancels the entire group booking.
+
+8. Security & Non-Functional Requirements
+8.1 Security Requirements
+Requirement
+Implementation
+Password storage
+Argon2id hashing via Django's default hasher (configured in settings)
+JWT security
+Short-lived access tokens (15 min), refresh token rotation on use
+CORS
+django-cors-headers: whitelist frontend origin only
+Rate limiting
+django-ratelimit: 10 req/min on auth endpoints, 60 req/min on booking
+SQL injection
+Django ORM parameterized queries exclusively — no raw SQL
+Email token security
+HMAC-SHA256 tokens, single-use, time-limited
+Input validation
+DRF serializers + Zod on frontend — double validation layer
+HTTPS
+Enforced in production via SECURE_SSL_REDIRECT = True
+Sensitive data
+No PII in JWT payload beyond user_id and role
+Audit trail
+All data-modifying actions logged in audit_logs table
+
+8.2 Performance Requirements
+Metric
+Target
+API response time (p95)
+< 200ms for booking and availability endpoints
+Slot availability load
+< 100ms (served from booked_count denormalized column)
+Analytics dashboard load
+< 500ms (served from pre-aggregated snapshots)
+Email delivery
+< 30 seconds from trigger event (Celery async)
+Concurrent booking safety
+Zero overbooking under any concurrent load (DB-level locking)
+Database
+MySQL indexes on all foreign keys and query-heavy columns
+8.3 Environment Configuration
+All sensitive values loaded from environment variables via django-environ. Required .env variables:
+	•	SECRET_KEY, DEBUG, ALLOWED_HOSTS
+	•	DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+	•	REDIS_URL (Celery broker and result backend)
+	•	EMAIL_HOST, EMAIL_PORT, EMAIL_HOST_USER, EMAIL_HOST_PASSWORD, DEFAULT_FROM_EMAIL
+	•	FRONTEND_URL (used in email links)
+	•	JWT_ACCESS_TOKEN_LIFETIME_MINUTES, JWT_REFRESH_TOKEN_LIFETIME_DAYS
+
+9. Development Phases & Milestones
+Phase
+Scope
+Duration
+Phase 1: Foundation
+Django project setup, custom user model, JWT auth, student + manager registration, email verification, admin approval flow
+1 week
+Phase 2: Facilities
+Facility CRUD, slot generation system, manager slot management, live availability API
+1 week
+Phase 3: Booking Core
+Booking engine with atomic capacity check, conflict prevention, cancellation, booking rules enforcement
+1 week
+Phase 4: Async Layer
+Celery + Redis setup, email notification tasks, waitlist promotion, no-show detection, reminder scheduling
+1 week
+Phase 5: Analytics
+Daily snapshot task, manager dashboard charts, admin global analytics, heatmap API
+1 week
+Phase 6: Intelligence
+Recommendation engine, feedback system, advanced booking rules (group bookings, approval flows)
+1 week
+Phase 7: Frontend
+React app, all dashboards, booking flow UI, live availability grid, analytics charts, responsive design
+2 weeks
+Phase 8: QA & Polish
+Integration testing, edge case handling, performance profiling, documentation
+1 week
+
+10. Appendix — Quick Reference
+10.1 Facility Type Reference
+Facility Type
+Requires Approval
+Min Group
+Default Max Duration
+Notes
+Library seat
+No
+1
+4 hours
+Individual seats assigned
+Study room
+No
+2
+3 hours
+Group rooms only
+Computer lab
+No
+1
+2 hours
+One seat/PC assigned
+Discussion room
+No
+2
+2 hours
+Small groups
+Seminar hall
+Yes
+5
+4 hours
+Manager approval required
+Music practice room
+No
+1
+2 hours
+Instrument bookings
+3D printing lab
+Yes
+1
+3 hours
+48h advance notice
+
+10.2 Booking Status State Machine
+From Status
+To Status
+Trigger
+—
+PENDING
+Booking created for requires_approval facility
+—
+CONFIRMED
+Booking created for self-service facility
+PENDING
+CONFIRMED
+Manager approves booking
+PENDING
+CANCELLED
+Manager rejects booking OR student cancels
+CONFIRMED
+CANCELLED
+Student cancels within cancellation window
+CONFIRMED
+NO_SHOW
+Check-in not received within grace period
+CONFIRMED
+COMPLETED
+Slot end time passes + check-in was recorded
+NO_SHOW
+COMPLETED
+Manual admin override only
+
+10.3 Key Django Package List
+Package
+Purpose
+djangorestframework
+REST API framework
+djangorestframework-simplejwt
+JWT authentication
+django-cors-headers
+CORS configuration
+django-environ
+Environment variable management
+celery
+Async task queue
+redis
+Celery broker and result backend
+django-celery-beat
+Periodic task scheduling (cron-like)
+django-ratelimit
+API rate limiting
+pillow
+Image processing for profile pictures
+django-filter
+Queryset filtering for list endpoints
+drf-spectacular
+Auto-generate OpenAPI 3.0 documentation
+pytest-django
+Test framework
+factory-boy
+Test data factories
+
+End of Document — UniReserve PRD v1.0

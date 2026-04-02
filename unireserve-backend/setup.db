@@ -1,0 +1,270 @@
+CREATE DATABASE IF NOT EXISTS setup;
+USE setup;
+
+SET FOREIGN_KEY_CHECKS = 0;
+
+-- 1. Users
+DROP TABLE IF EXISTS users;
+CREATE TABLE users (
+    id CHAR(36) PRIMARY KEY,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) NOT NULL,
+    role ENUM('STUDENT', 'MANAGER', 'ADMIN') NOT NULL,
+    student_id VARCHAR(50) NULL UNIQUE,
+    employee_id VARCHAR(50) NULL UNIQUE,
+    department VARCHAR(150) NULL,
+    year_of_study TINYINT UNSIGNED NULL,
+    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+    is_banned BOOLEAN NOT NULL DEFAULT FALSE,
+    ban_until DATETIME NULL,
+    no_show_count SMALLINT NOT NULL DEFAULT 0,
+    warning_count SMALLINT NOT NULL DEFAULT 0,
+    profile_picture VARCHAR(500) NULL,
+    last_login DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT NOW(),
+    updated_at DATETIME NOT NULL DEFAULT NOW() ON UPDATE NOW(),
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- 2. Email Verifications
+DROP TABLE IF EXISTS email_verifications;
+CREATE TABLE email_verifications (
+    id CHAR(36) PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    token CHAR(64) NOT NULL UNIQUE,
+    token_type ENUM('EMAIL_VERIFY', 'PASSWORD_RESET') NOT NULL,
+    expires_at DATETIME NOT NULL,
+    used_at DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- 3. Manager Approval Requests
+DROP TABLE IF EXISTS manager_approval_requests;
+CREATE TABLE manager_approval_requests (
+    id CHAR(36) PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    status ENUM('PENDING', 'APPROVED', 'REJECTED') NOT NULL DEFAULT 'PENDING',
+    approved_by CHAR(36) NULL,
+    rejection_reason VARCHAR(500) NULL,
+    created_at DATETIME NOT NULL DEFAULT NOW(),
+    updated_at DATETIME NOT NULL DEFAULT NOW() ON UPDATE NOW(),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- 4. Facilities
+DROP TABLE IF EXISTS facilities;
+CREATE TABLE facilities (
+    id CHAR(36) PRIMARY KEY,
+    name VARCHAR(200) NOT NULL,
+    facility_type ENUM('LIBRARY_SEAT', 'STUDENT_ROOM', 'STUDY_ROOM', 'COMPUTER_LAB', 'DISCUSSION_ROOM', 'SEMINAR_HALL', 'MUSIC_ROOM', 'PRINTING_LAB') NOT NULL,
+    description TEXT NULL,
+    building VARCHAR(150) NOT NULL,
+    floor VARCHAR(20) NULL,
+    room_number VARCHAR(30) NULL,
+    total_capacity SMALLINT NOT NULL,
+    requires_approval BOOLEAN NOT NULL DEFAULT FALSE,
+    min_group_size TINYINT NOT NULL DEFAULT 1,
+    max_booking_duration_mins SMALLINT NOT NULL DEFAULT 120,
+    slot_duration_mins SMALLINT NOT NULL DEFAULT 60,
+    images JSON NULL,
+    amenities JSON NULL,
+    manager_id CHAR(36) NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at DATETIME NOT NULL DEFAULT NOW(),
+    updated_at DATETIME NOT NULL DEFAULT NOW() ON UPDATE NOW(),
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+    FOREIGN KEY (manager_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX idx_facility_type ON facilities(facility_type);
+CREATE INDEX idx_facility_is_active ON facilities(is_active);
+
+-- 5. Facility Slots
+DROP TABLE IF EXISTS facility_slots;
+CREATE TABLE facility_slots (
+    id CHAR(36) PRIMARY KEY,
+    facility_id CHAR(36) NOT NULL,
+    slot_date DATE NOT NULL,
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL,
+    available_capacity SMALLINT NOT NULL,
+    booked_count SMALLINT NOT NULL DEFAULT 0,
+    is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+    block_reason VARCHAR(255) NULL,
+    created_at DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (facility_id) REFERENCES facilities(id) ON DELETE CASCADE,
+    UNIQUE KEY (facility_id, slot_date, start_time)
+);
+CREATE INDEX idx_slot_date ON facility_slots(slot_date);
+
+-- 6. Bookings
+DROP TABLE IF EXISTS bookings;
+CREATE TABLE bookings (
+    id CHAR(36) PRIMARY KEY,
+    student_id CHAR(36) NOT NULL,
+    facility_id CHAR(36) NOT NULL,
+    slot_id CHAR(36) NOT NULL,
+    booking_reference CHAR(12) NOT NULL UNIQUE,
+    status ENUM('PENDING', 'CONFIRMED', 'CANCELLED', 'COMPLETED', 'NO_SHOW') NOT NULL,
+    seat_number SMALLINT NULL,
+    group_size TINYINT NOT NULL DEFAULT 1,
+    group_members JSON NULL,
+    purpose VARCHAR(300) NULL,
+    approval_status ENUM('PENDING', 'APPROVED', 'REJECTED') NULL,
+    approved_by CHAR(36) NULL,
+    approved_at DATETIME NULL,
+    rejection_reason VARCHAR(500) NULL,
+    checked_in_at DATETIME NULL,
+    cancelled_at DATETIME NULL,
+    cancellation_reason VARCHAR(500) NULL,
+    created_at DATETIME NOT NULL DEFAULT NOW(),
+    updated_at DATETIME NOT NULL DEFAULT NOW() ON UPDATE NOW(),
+    FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (facility_id) REFERENCES facilities(id) ON DELETE RESTRICT,
+    FOREIGN KEY (slot_id) REFERENCES facility_slots(id) ON DELETE RESTRICT,
+    FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX idx_booking_student_slot ON bookings(student_id, slot_id);
+CREATE INDEX idx_booking_facility_status ON bookings(facility_id, status);
+CREATE INDEX idx_booking_slot_status ON bookings(slot_id, status);
+
+-- 7. Waitlist
+DROP TABLE IF EXISTS waitlist;
+CREATE TABLE waitlist (
+    id CHAR(36) PRIMARY KEY,
+    student_id CHAR(36) NOT NULL,
+    facility_id CHAR(36) NOT NULL,
+    slot_id CHAR(36) NOT NULL,
+    position SMALLINT NOT NULL,
+    status ENUM('WAITING', 'PROMOTED', 'EXPIRED', 'REMOVED') NOT NULL,
+    joined_at DATETIME NOT NULL DEFAULT NOW(),
+    promoted_at DATETIME NULL,
+    expires_at DATETIME NOT NULL,
+    FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (facility_id) REFERENCES facilities(id) ON DELETE CASCADE,
+    FOREIGN KEY (slot_id) REFERENCES facility_slots(id) ON DELETE CASCADE,
+    UNIQUE KEY (student_id, slot_id)
+);
+CREATE INDEX idx_waitlist_status_pos ON waitlist(status, position);
+
+-- 8. Booking Rules
+DROP TABLE IF EXISTS booking_rules;
+CREATE TABLE booking_rules (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    facility_id CHAR(36) NULL,
+    rule_key VARCHAR(100) NOT NULL,
+    rule_value VARCHAR(100) NOT NULL,
+    description VARCHAR(300) NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_by CHAR(36) NULL,
+    updated_at DATETIME NOT NULL DEFAULT NOW() ON UPDATE NOW(),
+    FOREIGN KEY (facility_id) REFERENCES facilities(id) ON DELETE CASCADE,
+    FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX idx_unique_facility_rule ON booking_rules(facility_id, rule_key);
+
+-- 9. Notifications
+DROP TABLE IF EXISTS notifications;
+CREATE TABLE notifications (
+    id CHAR(36) PRIMARY KEY,
+    user_id CHAR(36) NOT NULL,
+    notification_type ENUM('BOOKING_CONFIRMED', 'BOOKING_CANCELLED', 'WAITLIST_PROMOTED', 'REMINDER', 'BOOKING_APPROVED', 'BOOKING_REJECTED', 'BAN_WARNING', 'NO_SHOW_RECORDED') NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    body TEXT NOT NULL,
+    related_booking_id CHAR(36) NULL,
+    is_read BOOLEAN NOT NULL DEFAULT FALSE,
+    sent_via_email BOOLEAN NOT NULL DEFAULT FALSE,
+    email_sent_at DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (related_booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_notifications_user_read ON notifications(user_id, is_read);
+CREATE INDEX idx_notifications_created ON notifications(created_at);
+
+-- 10. Feedback
+DROP TABLE IF EXISTS feedback;
+CREATE TABLE feedback (
+    id CHAR(36) PRIMARY KEY,
+    booking_id CHAR(36) NOT NULL UNIQUE,
+    student_id CHAR(36) NOT NULL,
+    facility_id CHAR(36) NOT NULL,
+    cleanliness_rating TINYINT NOT NULL CHECK (cleanliness_rating >= 1 AND cleanliness_rating <= 5),
+    equipment_rating TINYINT NOT NULL CHECK (equipment_rating >= 1 AND equipment_rating <= 5),
+    experience_rating TINYINT NOT NULL CHECK (experience_rating >= 1 AND experience_rating <= 5),
+    overall_rating DECIMAL(3,2) AS ((cleanliness_rating + equipment_rating + experience_rating) / 3.0) STORED,
+    comment TEXT NULL,
+    is_flagged BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE RESTRICT,
+    FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (facility_id) REFERENCES facilities(id) ON DELETE RESTRICT
+);
+CREATE INDEX idx_feedback_facility_rating ON feedback(facility_id, overall_rating);
+
+-- 11. Audit Logs
+DROP TABLE IF EXISTS audit_logs;
+CREATE TABLE audit_logs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    actor_id CHAR(36) NULL,
+    actor_role ENUM('STUDENT', 'MANAGER', 'ADMIN') NOT NULL,
+    action VARCHAR(100) NOT NULL,
+    target_type VARCHAR(50) NULL,
+    target_id CHAR(36) NULL,
+    payload JSON NULL,
+    ip_address VARCHAR(45) NULL,
+    created_at DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX idx_audit_created ON audit_logs(created_at);
+CREATE INDEX idx_audit_actor ON audit_logs(actor_id);
+
+-- 12. Analytics Daily Snapshots
+DROP TABLE IF EXISTS analytics_daily_snapshots;
+CREATE TABLE analytics_daily_snapshots (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    facility_id CHAR(36) NOT NULL,
+    snapshot_date DATE NOT NULL,
+    total_bookings SMALLINT NOT NULL DEFAULT 0,
+    confirmed_bookings SMALLINT NOT NULL DEFAULT 0,
+    cancelled_bookings SMALLINT NOT NULL DEFAULT 0,
+    no_show_count SMALLINT NOT NULL DEFAULT 0,
+    utilization_percent DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+    peak_hour_start TIME NULL,
+    avg_rating DECIMAL(3,2) NULL,
+    unique_students SMALLINT NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (facility_id) REFERENCES facilities(id) ON DELETE CASCADE,
+    UNIQUE KEY (facility_id, snapshot_date)
+);
+
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- Safety nets / Triggers
+DELIMITER //
+DROP TRIGGER IF EXISTS trg_check_capacity //
+CREATE TRIGGER trg_check_capacity 
+BEFORE UPDATE ON facility_slots
+FOR EACH ROW 
+BEGIN
+    IF NEW.booked_count > NEW.available_capacity THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Slot capacity exceeded. Booked count cannot be greater than available capacity.';
+    END IF;
+END;
+//
+DELIMITER ;
+
+-- Default Booking Rules
+INSERT INTO booking_rules (rule_key, rule_value, description) VALUES
+('MAX_BOOKINGS_PER_DAY', '3', 'Max simultaneous-day bookings per student'),
+('MAX_HOURS_PER_WEEK', '10', 'Max total booking hours per student per week'),
+('MIN_ADVANCE_BOOKING_MINS', '30', 'Slots must be booked at least 30 min in advance'),
+('MAX_ADVANCE_BOOKING_DAYS', '14', 'Cannot book more than 14 days ahead'),
+('CANCELLATION_WINDOW_MINS', '30', 'Must cancel at least 30 min before slot starts'),
+('NO_SHOW_CHECKIN_GRACE_MINS', '15', 'Minutes after slot start before no-show is triggered'),
+('NO_SHOW_BAN_THRESHOLD', '3', 'No-shows before temporary ban is applied'),
+('NO_SHOW_BAN_DURATION_DAYS', '7', 'Duration of temporary booking ban in days'),
+('WARNING_BEFORE_BAN', '2', 'Warnings issued before ban (at threshold - 1)');

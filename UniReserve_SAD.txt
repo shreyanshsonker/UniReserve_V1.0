@@ -1,0 +1,1924 @@
+
+
+
+
+UniReserve
+System Architecture Document
+Complete Technical Reference  ·  v1.0
+Stack
+Django REST API · React · MySQL · Celery · Redis
+Architecture
+Monorepo · RESTful API · Role-based auth
+Document Type
+System Architecture Document (SAD)
+Audience
+Engineering team · Examiners · Tech leads
+
+1. System Overview
+1.1 Architecture Pattern
+UniReserve follows a decoupled client-server architecture. The Django REST API backend and React frontend are completely separated — they communicate exclusively through HTTP/JSON over a versioned REST API. This separation allows independent deployment, independent testing, and clean role boundary enforcement at the API layer.
+
+Layer
+Technology
+Responsibility
+Presentation
+React 18 + Tailwind CSS
+User interface, routing, client-side state
+API Gateway
+Django REST Framework
+Request validation, auth, business logic orchestration
+Business Logic
+Django apps + service classes
+Booking rules, waitlist, recommendations
+Async Processing
+Celery + Redis
+Email dispatch, no-show detection, analytics snapshots
+Persistence
+MySQL 8.0
+All relational data, indexes, transactions
+Cache / Broker
+Redis
+Celery task broker, result backend, session cache
+
+1.2 High-Level Data Flow
+	•	React app sends HTTP request with JWT Bearer token in Authorization header.
+	•	Django receives request → JWT middleware validates token → extracts user_id and role.
+	•	DRF permission class checks role against endpoint requirements. Fails → 403.
+	•	View/ViewSet calls a service function (never puts logic in the view directly).
+	•	Service validates business rules → queries MySQL via Django ORM.
+	•	If async work needed (email, analytics), service dispatches a Celery task.
+	•	Serializer converts queryset to JSON → response returned to React.
+	•	Celery worker picks up task from Redis queue → executes independently of request cycle.
+
+1.3 Environment Tiers
+Environment
+Purpose
+Database
+Celery
+development
+Local dev with hot reload
+Local MySQL
+Single-process eager mode (CELERY_TASK_ALWAYS_EAGER=True)
+testing
+Automated test suite
+In-memory SQLite or test MySQL
+Synchronous execution
+production
+Live university deployment
+MySQL 8.0 (managed)
+Dedicated worker processes
+
+2. Backend — File Structure
+Every Django app follows the same internal structure. New developers should be able to navigate any app without a map. Files that do not exist in a standard Django project are highlighted with comments.
+
+2.1 Root Project Layout
+unireserve-backend/
+├── manage.py
+├── requirements/
+│   ├── base.txt              # Shared packages
+│   ├── development.txt       # Dev-only (debug toolbar, etc.)
+│   └── production.txt        # Prod-only (gunicorn, sentry)
+├── .env.example              # Environment variable template
+├── .env                      # Local secrets (git-ignored)
+├── pytest.ini                # Test configuration
+├── docker-compose.yml        # Local MySQL + Redis + worker
+│
+├── unireserve/               # Django project package
+│   ├── __init__.py           # Imports celery app for auto-discovery
+│   ├── settings/
+│   │   ├── __init__.py
+│   │   ├── base.py           # Shared settings (installed apps, middleware)
+│   │   ├── development.py    # DEBUG=True, email backend=console
+│   │   └── production.py     # Secure cookies, HTTPS, logging
+│   ├── urls.py               # Root URLconf — includes all app urls
+│   ├── celery.py             # Celery application instantiation
+│   └── wsgi.py
+│
+├── apps/                     # All Django apps live here
+│   ├── core/
+│   ├── accounts/
+│   ├── facilities/
+│   ├── bookings/
+│   ├── notifications/
+│   └── analytics/
+│
+└── scripts/
+    ├── seed_data.py          # Populate dev DB with realistic fixtures
+    └── generate_slots.py     # CLI helper for bulk slot generation
+
+2.2 App: core/
+Shared utilities, base classes, and cross-cutting concerns. Every other app imports from here — nothing imports core from another app.
+apps/core/
+├── __init__.py
+├── apps.py
+├── models.py                 # Abstract base: UUIDModel, TimeStampedModel
+├── exceptions.py             # Custom DRF exception classes (BookingRuleViolated, etc.)
+├── permissions.py            # IsStudent, IsManager, IsAdmin, IsOwnerOrAdmin
+├── pagination.py             # StandardResultsPagination (20/page default)
+├── renderers.py              # Wraps all responses in {success, data, message} envelope
+├── validators.py             # Shared validators: university_email, future_date
+├── mixins.py                 # SoftDeleteMixin, AuditLogMixin for models
+└── utils/
+    ├── __init__.py
+    ├── tokens.py             # HMAC-SHA256 token generation / verification
+    └── date_utils.py         # Week boundaries, slot overlap checks
+
+core/models.py — abstract bases used by all apps:
+class UUIDModel(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    class Meta: abstract = True
+
+class TimeStampedModel(UUIDModel):
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_deleted = models.BooleanField(default=False)
+
+    objects = SoftDeleteManager()   # filters is_deleted=False by default
+    all_objects = models.Manager()  # unfiltered — for admin and audit queries
+    class Meta: abstract = True
+
+2.3 App: accounts/
+apps/accounts/
+├── __init__.py
+├── apps.py
+├── models.py                 # User (AbstractUser ext.), EmailVerification
+├── managers.py               # UserManager with create_superuser override
+├── serializers/
+│   ├── __init__.py
+│   ├── registration.py       # StudentRegisterSerializer, ManagerRegisterSerializer
+│   ├── auth.py               # LoginSerializer, TokenRefreshSerializer
+│   ├── profile.py            # UserProfileSerializer, UserListSerializer
+│   └── admin.py              # AdminUserSerializer (includes ban fields)
+├── views/
+│   ├── __init__.py
+│   ├── auth.py               # Login, logout, token refresh, password reset
+│   ├── registration.py       # Student register, manager register, email verify
+│   └── user.py               # Profile CRUD, admin user management
+├── services/
+│   ├── __init__.py
+│   ├── auth_service.py       # JWT issue, blacklist, token rotation logic
+│   └── user_service.py       # Ban logic, approval logic, profile update
+├── signals.py                # post_save on User → audit log entry
+├── urls.py
+├── admin.py                  # Django admin registration
+└── tests/
+    ├── test_registration.py
+    ├── test_auth.py
+    └── test_user_management.py
+
+2.4 App: facilities/
+apps/facilities/
+├── __init__.py
+├── apps.py
+├── models.py                 # Facility, FacilitySlot, BookingRule
+├── serializers/
+│   ├── facility.py           # FacilitySerializer, FacilityListSerializer
+│   ├── slot.py               # FacilitySlotSerializer, SlotAvailabilitySerializer
+│   └── rule.py               # BookingRuleSerializer
+├── views/
+│   ├── facility.py           # FacilityViewSet (CRUD)
+│   ├── slot.py               # SlotViewSet, generate_slots action, block action
+│   └── availability.py       # AvailabilityView — live color-coded availability
+├── services/
+│   ├── slot_generator.py     # Generates FacilitySlot rows for a date range
+│   └── availability_service.py  # Computes availability percentages
+├── filters.py                # FacilityFilter (by type, building, capacity)
+├── signals.py
+├── urls.py
+├── admin.py
+└── tests/
+    ├── test_facility_crud.py
+    ├── test_slot_generation.py
+    └── test_availability.py
+
+2.5 App: bookings/
+apps/bookings/
+├── __init__.py
+├── apps.py
+├── models.py                 # Booking, Waitlist
+├── serializers/
+│   ├── booking.py            # BookingCreateSerializer, BookingDetailSerializer
+│   ├── booking_list.py       # BookingListSerializer (condensed for lists)
+│   └── waitlist.py           # WaitlistSerializer
+├── views/
+│   ├── booking.py            # BookingViewSet — create, list, cancel, check_in
+│   ├── approval.py           # ApprovalView — manager approve/reject
+│   └── waitlist.py           # WaitlistViewSet — join, leave, list
+├── services/
+│   ├── booking_service.py    # Core booking creation: 8-step validation pipeline
+│   ├── rules_service.py      # Loads and evaluates BookingRule for a student+slot
+│   ├── waitlist_service.py   # Queue management, position calculation
+│   └── cancellation_service.py  # Cancel flow, triggers waitlist promotion
+├── signals.py                # post_save → promote_waitlist_on_cancel Celery task
+├── urls.py
+├── admin.py
+└── tests/
+    ├── test_booking_creation.py  # Includes concurrency / race condition tests
+    ├── test_booking_rules.py
+    ├── test_waitlist.py
+    └── test_cancellation.py
+
+2.6 App: notifications/
+apps/notifications/
+├── __init__.py
+├── apps.py
+├── models.py                 # Notification
+├── serializers.py            # NotificationSerializer
+├── views.py                  # NotificationListView, mark_read action
+├── tasks/
+│   ├── __init__.py
+│   ├── email_tasks.py        # All Celery email dispatch tasks
+│   └── system_tasks.py       # No-show detector, waitlist expiry, snapshots
+├── email_templates/
+│   ├── booking_confirmed.html
+│   ├── booking_cancelled.html
+│   ├── waitlist_promoted.html
+│   ├── slot_reminder.html
+│   ├── manager_approved.html
+│   ├── manager_rejected.html
+│   ├── ban_warning.html
+│   └── no_show_recorded.html
+├── urls.py
+└── tests/
+    └── test_notification_dispatch.py
+
+2.7 App: analytics/
+apps/analytics/
+├── __init__.py
+├── apps.py
+├── models.py                 # AnalyticsDailySnapshot
+├── serializers.py            # SnapshotSerializer, HeatmapSerializer
+├── views/
+│   ├── manager_analytics.py  # Facility-level charts: daily usage, heatmap, ratings
+│   └── admin_analytics.py    # Global: KPIs, facility ranking, cancellation rates
+├── services/
+│   ├── snapshot_service.py   # Aggregation logic for nightly snapshot task
+│   └── recommendation_service.py  # Personalized slot recommendation engine
+├── tasks.py                  # generate_daily_snapshot Celery beat task
+├── urls.py
+└── tests/
+    ├── test_snapshots.py
+    └── test_recommendations.py
+
+3. Backend — API Routes (Complete)
+All routes are prefixed with /api/v1/. Authentication uses JWT Bearer tokens. Role column shows minimum required role. "Owner" means the resource's owning student can access it.
+
+3.1 Auth Routes  —  /api/v1/auth/
+Method
+Path
+Description
+Role
+Request Body Key Fields
+POST
+/register/student/
+Student self-registration
+Public
+email, student_id, password, department, year
+POST
+/register/manager/
+Manager registration (pending)
+Public
+email, employee_id, department, facility_name
+GET
+/verify-email/<token>/
+Activate account via email link
+Public
+—
+POST
+/login/
+Issue JWT access + refresh tokens
+Public
+email, password
+POST
+/logout/
+Blacklist refresh token
+JWT
+refresh
+POST
+/token/refresh/
+Issue new access token
+Refresh Token
+refresh
+POST
+/password-reset/
+Send reset email
+Public
+email
+POST
+/password-reset/confirm/
+Apply new password
+Public
+token, new_password
+
+3.2 User Routes  —  /api/v1/users/
+Method
+Path
+Description
+Role
+GET
+/me/
+Get own profile
+JWT (any)
+PATCH
+/me/
+Update name, department, profile picture
+JWT (any)
+POST
+/me/change-password/
+Change password (requires current password)
+JWT (any)
+GET
+/
+List all users (paginated, filterable by role)
+Admin
+GET
+/<uuid>/
+Get single user detail
+Admin
+PATCH
+/<uuid>/ban/
+Ban or unban a user
+Admin
+PATCH
+/<uuid>/approve-manager/
+Approve or reject pending manager
+Admin
+DELETE
+/<uuid>/
+Soft-delete user account
+Admin
+
+3.3 Facility Routes  —  /api/v1/facilities/
+Method
+Path
+Description
+Role
+GET
+/
+List facilities (filter: type, building, capacity, is_active)
+JWT (any)
+POST
+/
+Create new facility
+Admin
+GET
+/<uuid>/
+Facility detail with amenities + current manager
+JWT (any)
+PATCH
+/<uuid>/
+Update facility fields
+Admin / Manager (own)
+DELETE
+/<uuid>/
+Soft-delete facility
+Admin
+POST
+/<uuid>/generate-slots/
+Generate slots for a date range (async)
+Manager / Admin
+GET
+/<uuid>/slots/
+Get slots for date range with live counts
+JWT (any)
+PATCH
+/<uuid>/slots/<slot_uuid>/
+Edit slot (capacity, blocked)
+Manager / Admin
+POST
+/<uuid>/slots/<slot_uuid>/block/
+Block slot with reason
+Manager / Admin
+DELETE
+/<uuid>/slots/<slot_uuid>/
+Delete future slot
+Manager / Admin
+GET
+/<uuid>/availability/
+Color-coded availability for calendar view
+JWT (any)
+GET
+/<uuid>/feedback/
+Paginated reviews for facility
+JWT (any)
+
+3.4 Booking Routes  —  /api/v1/bookings/
+Method
+Path
+Description
+Role
+POST
+/
+Create booking (runs full 8-step validation)
+Student
+GET
+/
+List bookings (student: own; manager: facility; admin: all)
+JWT (any)
+GET
+/<uuid>/
+Booking detail with slot + facility info
+Owner / Manager / Admin
+POST
+/<uuid>/cancel/
+Cancel booking (respects cancellation window)
+Owner / Admin
+POST
+/<uuid>/check-in/
+Record student check-in to prevent no-show
+Owner
+POST
+/<uuid>/approve/
+Manager approves a pending booking
+Manager / Admin
+POST
+/<uuid>/reject/
+Manager rejects with reason
+Manager / Admin
+GET
+/pending-approval/
+Manager sees all pending bookings for their facilities
+Manager / Admin
+GET
+/history/
+Student booking history (includes completed + cancelled)
+Owner
+
+3.5 Waitlist Routes  —  /api/v1/waitlist/
+Method
+Path
+Description
+Role
+POST
+/
+Join waitlist for a full slot
+Student
+GET
+/
+Student's current waitlist positions
+Student
+DELETE
+/<uuid>/
+Leave waitlist (remove entry)
+Owner
+GET
+/<uuid>/position/
+Current queue position for an entry
+Owner
+
+3.6 Notification Routes  —  /api/v1/notifications/
+Method
+Path
+Description
+Role
+GET
+/
+List own notifications (paginated, unread first)
+JWT (any)
+POST
+/<uuid>/read/
+Mark single notification as read
+Owner
+POST
+/read-all/
+Mark all notifications as read
+JWT (any)
+GET
+/unread-count/
+Count of unread notifications (for badge)
+JWT (any)
+
+3.7 Analytics Routes  —  /api/v1/analytics/
+Method
+Path
+Description
+Role
+GET
+/overview/
+System-wide KPIs: total bookings, active users, no-show rate
+Admin
+GET
+/facility/<uuid>/
+Daily usage over date range for one facility
+Manager / Admin
+GET
+/facility/<uuid>/heatmap/
+7×24 hour heatmap matrix for booking patterns
+Manager / Admin
+GET
+/facility/<uuid>/peak-hours/
+Top 5 busiest hours for a facility
+Manager / Admin
+GET
+/facility/<uuid>/ratings/
+Rating breakdown: avg + distribution
+Manager / Admin
+GET
+/facility-ranking/
+All facilities sorted by bookings or rating
+Admin
+GET
+/cancellation-rate/
+Cancellation % over time (global or per facility)
+Admin
+GET
+/student-trends/
+New students, active students over time
+Admin
+
+3.8 Recommendations Route  —  /api/v1/
+Method
+Path
+Description
+Role
+GET
+/recommendations/
+Personalized slot suggestions (up to 5)
+Student
+GET
+/feedback/
+Submit rating after completed booking
+Student
+POST
+/feedback/
+Post review: cleanliness, equipment, experience
+Student
+
+4. Database — Complete Schema Reference
+MySQL 8.0+. All UUIDs stored as CHAR(36). All timestamps UTC. Soft deletes via is_deleted flag — rows are never physically removed from transactional tables. Analytics tables may be truncated and regenerated.
+
+4.1 Entity Relationship Summary
+Table
+Primary Key
+Key Foreign Keys
+Critical Indexes
+users
+uuid
+—
+email UNIQUE, role, is_banned
+email_verifications
+uuid
+user_id → users
+token UNIQUE, token_type, expires_at
+facilities
+uuid
+manager_id → users
+facility_type, is_active, building
+facility_slots
+uuid
+facility_id → facilities
+UNIQUE(facility_id, slot_date, start_time), slot_date
+bookings
+uuid
+student_id → users, facility_id, slot_id
+UNIQUE(student_id, slot_id) status≠CANCELLED, status, facility_id+status
+waitlist
+uuid
+student_id, facility_id, slot_id
+UNIQUE(student_id, slot_id), position, status
+booking_rules
+int (auto)
+facility_id → facilities (nullable)
+facility_id + rule_key UNIQUE
+notifications
+uuid
+user_id → users, booking_id → bookings
+user_id + is_read, created_at
+feedback
+uuid
+booking_id → bookings (UNIQUE), student_id, facility_id
+facility_id + overall_rating
+audit_logs
+bigint (auto)
+actor_id → users
+created_at, actor_id, action
+analytics_daily_snapshots
+int (auto)
+facility_id → facilities
+UNIQUE(facility_id, snapshot_date)
+
+4.2 Table: users
+Column
+Type
+Nullable
+Default
+Notes
+id
+CHAR(36)
+No
+uuid()
+PK
+email
+VARCHAR(255)
+No
+—
+UNIQUE — login identifier
+password
+VARCHAR(255)
+No
+—
+Argon2id hash
+first_name
+VARCHAR(100)
+No
+—
+
+last_name
+VARCHAR(100)
+No
+—
+
+role
+ENUM
+No
+—
+STUDENT | MANAGER | ADMIN
+student_id
+VARCHAR(50)
+Yes
+NULL
+UNIQUE, students only
+employee_id
+VARCHAR(50)
+Yes
+NULL
+UNIQUE, managers only
+department
+VARCHAR(150)
+Yes
+NULL
+
+year_of_study
+TINYINT UNSIGNED
+Yes
+NULL
+1–6, students only
+is_active
+BOOLEAN
+No
+FALSE
+False until email verified / admin approved
+is_banned
+BOOLEAN
+No
+FALSE
+
+ban_until
+DATETIME
+Yes
+NULL
+NULL = permanent ban
+no_show_count
+SMALLINT
+No
+0
+Incremented by Celery task
+warning_count
+SMALLINT
+No
+0
+
+profile_picture
+VARCHAR(500)
+Yes
+NULL
+S3 / media URL
+last_login
+DATETIME
+Yes
+NULL
+Updated on JWT issue
+created_at
+DATETIME
+No
+NOW()
+
+updated_at
+DATETIME
+No
+NOW()
+ON UPDATE NOW()
+is_deleted
+BOOLEAN
+No
+FALSE
+Soft delete
+
+4.3 Table: facilities
+Column
+Type
+Nullable
+Default
+Notes
+id
+CHAR(36)
+No
+uuid()
+PK
+name
+VARCHAR(200)
+No
+—
+
+facility_type
+ENUM
+No
+—
+LIBRARY_SEAT | STUDY_ROOM | COMPUTER_LAB | DISCUSSION_ROOM | SEMINAR_HALL | MUSIC_ROOM | PRINTING_LAB
+description
+TEXT
+Yes
+NULL
+
+building
+VARCHAR(150)
+No
+—
+
+floor
+VARCHAR(20)
+Yes
+NULL
+
+room_number
+VARCHAR(30)
+Yes
+NULL
+
+total_capacity
+SMALLINT
+No
+—
+Max simultaneous occupants
+requires_approval
+BOOLEAN
+No
+FALSE
+TRUE for labs, seminar halls
+min_group_size
+TINYINT
+No
+1
+≥2 for group rooms
+max_booking_duration_mins
+SMALLINT
+No
+120
+
+slot_duration_mins
+SMALLINT
+No
+60
+Granularity for slot generation
+operating_hours_start
+TIME
+No
+08:00
+Daily open time
+operating_hours_end
+TIME
+No
+20:00
+Daily close time
+operating_days
+JSON
+No
+[1,2,3,4,5]
+ISO weekdays: 1=Mon … 7=Sun
+images
+JSON
+Yes
+NULL
+Array of image URLs
+amenities
+JSON
+Yes
+NULL
+["whiteboard","projector","AC"]
+manager_id
+CHAR(36)
+Yes
+NULL
+FK → users.id SET NULL
+is_active
+BOOLEAN
+No
+TRUE
+
+created_at
+DATETIME
+No
+NOW()
+
+updated_at
+DATETIME
+No
+NOW()
+ON UPDATE NOW()
+is_deleted
+BOOLEAN
+No
+FALSE
+
+
+4.4 Table: facility_slots
+Column
+Type
+Nullable
+Default
+Notes
+id
+CHAR(36)
+No
+uuid()
+PK
+facility_id
+CHAR(36)
+No
+—
+FK → facilities.id CASCADE DELETE
+slot_date
+DATE
+No
+—
+Calendar date
+start_time
+TIME
+No
+—
+
+end_time
+TIME
+No
+—
+Computed: start + slot_duration_mins
+available_capacity
+SMALLINT
+No
+—
+Copied from facility at generation time
+booked_count
+SMALLINT
+No
+0
+Denormalized — incremented/decremented atomically
+is_blocked
+BOOLEAN
+No
+FALSE
+Manager can block (maintenance, holidays)
+block_reason
+VARCHAR(255)
+Yes
+NULL
+
+created_at
+DATETIME
+No
+NOW()
+
+UNIQUE constraint: (facility_id, slot_date, start_time) — prevents duplicate slot generation.
+
+4.5 Table: bookings
+Column
+Type
+Nullable
+Default
+Notes
+id
+CHAR(36)
+No
+uuid()
+PK
+student_id
+CHAR(36)
+No
+—
+FK → users.id RESTRICT
+facility_id
+CHAR(36)
+No
+—
+FK → facilities.id RESTRICT
+slot_id
+CHAR(36)
+No
+—
+FK → facility_slots.id RESTRICT
+booking_reference
+CHAR(12)
+No
+—
+UNIQUE — e.g. UNI-KX7P2Q
+status
+ENUM
+No
+CONFIRMED
+PENDING|CONFIRMED|CANCELLED|COMPLETED|NO_SHOW
+seat_number
+SMALLINT
+Yes
+NULL
+Specific assigned seat (labs/library)
+group_size
+TINYINT
+No
+1
+
+group_members
+JSON
+Yes
+NULL
+Array of student UUIDs
+purpose
+VARCHAR(300)
+Yes
+NULL
+Student-stated reason
+approval_status
+ENUM
+Yes
+NULL
+PENDING|APPROVED|REJECTED (requires_approval only)
+approved_by
+CHAR(36)
+Yes
+NULL
+FK → users.id manager who decided
+approved_at
+DATETIME
+Yes
+NULL
+
+rejection_reason
+VARCHAR(500)
+Yes
+NULL
+
+checked_in_at
+DATETIME
+Yes
+NULL
+NULL = potential no-show
+cancelled_at
+DATETIME
+Yes
+NULL
+
+cancellation_reason
+VARCHAR(500)
+Yes
+NULL
+
+created_at
+DATETIME
+No
+NOW()
+
+updated_at
+DATETIME
+No
+NOW()
+ON UPDATE NOW()
+Partial UNIQUE index: (student_id, slot_id) WHERE status NOT IN (CANCELLED) — enforced at app layer since MySQL partial indexes have limitations. A database trigger is the safety net.
+
+4.6 Table: waitlist
+Column
+Type
+Nullable
+Default
+Notes
+id
+CHAR(36)
+No
+uuid()
+PK
+student_id
+CHAR(36)
+No
+—
+FK → users.id CASCADE DELETE
+facility_id
+CHAR(36)
+No
+—
+FK → facilities.id CASCADE DELETE
+slot_id
+CHAR(36)
+No
+—
+FK → facility_slots.id CASCADE DELETE
+position
+SMALLINT
+No
+—
+Queue position — 1 = next promoted
+status
+ENUM
+No
+WAITING
+WAITING|PROMOTED|EXPIRED|REMOVED
+joined_at
+DATETIME
+No
+NOW()
+
+promoted_at
+DATETIME
+Yes
+NULL
+
+expires_at
+DATETIME
+No
+—
+Set to slot_date end — cleaned up by beat task
+
+4.7 Tables: notifications, feedback, booking_rules, audit_logs
+Table
+Key Columns
+Purpose
+notifications
+user_id, type ENUM(8 types), is_read, sent_via_email, related_booking_id
+In-app and email notification records
+feedback
+booking_id UNIQUE, cleanliness_rating, equipment_rating, experience_rating (all 1–5), overall_rating DECIMAL, is_flagged
+Post-use facility reviews — one per completed booking
+booking_rules
+facility_id (nullable = global), rule_key VARCHAR, rule_value VARCHAR, is_active
+Configurable rule store — facility_id NULL means global default
+audit_logs
+actor_id, actor_role, action VARCHAR, target_type, target_id, payload JSON, ip_address
+Immutable event log — never updated, never deleted
+analytics_daily_snapshots
+facility_id, snapshot_date DATE, total_bookings, confirmed, cancelled, no_show_count, utilization_percent, peak_hour_start, avg_rating, unique_students
+Pre-aggregated nightly summary for fast dashboard queries
+
+5. Frontend — File Structure
+React 18 with Vite as bundler. Feature-based folder structure — each domain (bookings, facilities, etc.) is a self-contained folder with its own components, hooks, and API calls.
+
+5.1 Root Layout
+unireserve-frontend/
+├── index.html
+├── vite.config.js
+├── tailwind.config.js
+├── .env.example              # VITE_API_BASE_URL, VITE_APP_NAME
+├── package.json
+│
+└── src/
+    ├── main.jsx              # App entry — mounts React, wraps QueryClientProvider
+    ├── App.jsx               # Root router — role-based redirect logic
+    │
+    ├── api/                  # Axios instances and per-domain API functions
+    ├── assets/               # Static images, SVGs, fonts
+    ├── components/           # Globally shared UI components
+    ├── contexts/             # React contexts: Auth, Notification
+    ├── features/             # Domain features (main code lives here)
+    ├── hooks/                # Shared custom hooks
+    ├── layouts/              # Page layout shells (sidebar, topbar, etc.)
+    ├── pages/                # Route-level page components
+    ├── router/               # Route definitions and protected route HOCs
+    └── utils/                # Pure helper functions
+
+5.2 src/api/  —  HTTP Layer
+src/api/
+├── axios.js                  # Axios instance: baseURL, JWT interceptor, auto-refresh
+├── auth.api.js               # login(), register(), logout(), refreshToken()
+├── users.api.js              # getMe(), updateProfile(), banUser(), approveManager()
+├── facilities.api.js         # getFacilities(), getFacility(), getSlots(), getAvailability()
+├── bookings.api.js           # createBooking(), cancelBooking(), checkIn(), getHistory()
+├── waitlist.api.js           # joinWaitlist(), leaveWaitlist(), getMyWaitlist()
+├── notifications.api.js      # getNotifications(), markRead(), getUnreadCount()
+└── analytics.api.js          # getOverview(), getFacilityHeatmap(), getRankings()
+
+src/api/axios.js — critical interceptor logic:
+const api = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL });
+
+// Request: attach access token
+api.interceptors.request.use(config => {
+  const token = useAuthStore.getState().accessToken;
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+// Response: on 401, attempt token refresh once
+api.interceptors.response.use(null, async error => {
+  if (error.response?.status === 401 && !error.config._retry) {
+    error.config._retry = true;
+    const newToken = await refreshAccessToken();
+    error.config.headers.Authorization = `Bearer ${newToken}`;
+    return api(error.config);
+  }
+  return Promise.reject(error);
+});
+
+5.3 src/features/  —  Domain Feature Folders
+src/features/
+├── auth/
+│   ├── components/
+│   │   ├── LoginForm.jsx
+│   │   ├── StudentRegisterForm.jsx
+│   │   ├── ManagerRegisterForm.jsx
+│   │   └── PasswordResetForm.jsx
+│   ├── hooks/
+│   │   ├── useLogin.js           # useMutation wrapping login API + token storage
+│   │   └── useRegister.js
+│   └── store/
+│       └── authStore.js          # Zustand store: accessToken, user, role
+│
+├── facilities/
+│   ├── components/
+│   │   ├── FacilityCard.jsx      # Thumbnail card for browse grid
+│   │   ├── FacilityFilters.jsx   # Type, building, capacity filter bar
+│   │   ├── FacilityDetail.jsx    # Full info: amenities, images, ratings
+│   │   ├── AvailabilityCalendar.jsx  # Month view with color-coded slot grid
+│   │   ├── SlotGrid.jsx          # Day view: time blocks with Green/Yellow/Red/Gray
+│   │   ├── SlotBadge.jsx         # Individual colored slot pill component
+│   │   └── FacilityForm.jsx      # Create/edit form (admin/manager)
+│   ├── hooks/
+│   │   ├── useFacilities.js      # useQuery for facilities list
+│   │   ├── useFacility.js        # useQuery for single facility
+│   │   └── useAvailability.js    # useQuery polling every 30s for live data
+│   └── utils/
+│       └── availability.utils.js  # Computes color from booked_count/capacity
+│
+├── bookings/
+│   ├── components/
+│   │   ├── BookingForm.jsx        # Slot selection → purpose → confirm
+│   │   ├── BookingCard.jsx        # Summary card for list views
+│   │   ├── BookingDetail.jsx      # Full booking detail with QR / reference
+│   │   ├── BookingStatusBadge.jsx # Color-coded status pill
+│   │   ├── CancelBookingModal.jsx
+│   │   ├── CheckInButton.jsx      # Only visible within slot window
+│   │   └── GroupMemberSelector.jsx # Multi-select student search for group rooms
+│   └── hooks/
+│       ├── useBookings.js
+│       ├── useCreateBooking.js    # useMutation — handles SLOT_FULL → offer waitlist
+│       └── useCancelBooking.js
+│
+├── waitlist/
+│   ├── components/
+│   │   ├── WaitlistCard.jsx      # Shows position + estimated wait
+│   │   └── JoinWaitlistModal.jsx # Confirmation before joining
+│   └── hooks/
+│       └── useWaitlist.js
+│
+├── notifications/
+│   ├── components/
+│   │   ├── NotificationBell.jsx   # Icon + unread count badge in topbar
+│   │   ├── NotificationDropdown.jsx
+│   │   └── NotificationItem.jsx
+│   └── hooks/
+│       └── useNotifications.js    # Polls /unread-count/ every 60s
+│
+├── analytics/
+│   ├── components/
+│   │   ├── DailyUsageChart.jsx    # Line chart — Chart.js
+│   │   ├── HeatmapGrid.jsx        # 7×24 CSS grid — color by booking density
+│   │   ├── FacilityRankingChart.jsx # Horizontal bar chart
+│   │   ├── UtilizationGauge.jsx   # Donut chart for utilization %
+│   │   ├── RatingBreakdown.jsx    # Star distribution bar chart
+│   │   └── KpiCard.jsx            # Reusable metric tile with trend arrow
+│   └── hooks/
+│       ├── useAnalytics.js
+│       └── useHeatmap.js
+│
+├── manager/
+│   ├── components/
+│   │   ├── SlotManager.jsx        # Calendar + block/unblock slots
+│   │   ├── PendingApprovalList.jsx
+│   │   ├── ApprovalCard.jsx
+│   │   └── GenerateSlotsForm.jsx  # Date range + confirm generation
+│   └── hooks/
+│       └── useManagerFacilities.js
+│
+└── admin/
+    ├── components/
+    │   ├── UserTable.jsx          # Sortable, searchable user list
+    │   ├── UserDetailModal.jsx
+    │   ├── BanUserForm.jsx
+    │   ├── RulesEditor.jsx        # Table of rule_key / rule_value pairs
+    │   └── PendingManagerList.jsx
+    └── hooks/
+        └── useAdminUsers.js
+
+5.4 src/components/  —  Shared UI
+src/components/
+├── ui/
+│   ├── Button.jsx            # Variants: primary, secondary, danger, ghost
+│   ├── Input.jsx             # Controlled input with label + error
+│   ├── Select.jsx
+│   ├── Modal.jsx             # Portal-based modal with backdrop
+│   ├── Badge.jsx             # Status pills with color prop
+│   ├── Spinner.jsx
+│   ├── EmptyState.jsx        # Illustrated empty state with CTA
+│   ├── ErrorBoundary.jsx
+│   ├── Pagination.jsx
+│   └── Toast.jsx             # Thin wrapper over react-hot-toast
+├── layout/
+│   ├── ProtectedRoute.jsx    # Checks auth + role, redirects if not allowed
+│   ├── PageTitle.jsx         # Sets document.title + breadcrumb
+│   └── LoadingPage.jsx       # Full-screen skeleton during initial auth check
+└── feedback/
+    ├── FeedbackForm.jsx      # 3-axis star rating + optional comment
+    └── StarRating.jsx        # Controlled star input component
+
+5.5 src/layouts/  —  Page Shell Components
+src/layouts/
+├── StudentLayout.jsx         # Sidebar: Dashboard, Facilities, My Bookings, Waitlist
+├── ManagerLayout.jsx         # Sidebar: Dashboard, My Facilities, Pending Approvals, Analytics
+├── AdminLayout.jsx           # Sidebar: Dashboard, Users, Facilities, Analytics, Rules
+└── AuthLayout.jsx            # Centered card layout for login/register pages
+
+6. Frontend — Routes (Complete)
+All routes wrapped in a ProtectedRoute component that checks JWT validity and role. Expired tokens trigger silent refresh via the Axios interceptor. Failed refresh → redirect to /login.
+
+6.1 Public Routes (no auth required)
+Path
+Component
+Description
+/login
+pages/LoginPage.jsx
+Email + password form. On success → redirect by role.
+/register
+pages/RegisterPage.jsx
+Tab UI: Student tab / Manager tab. Different forms.
+/register/student
+features/auth/components/StudentRegisterForm
+Student registration
+/register/manager
+features/auth/components/ManagerRegisterForm
+Manager registration (pending approval)
+/verify-email/:token
+pages/EmailVerifyPage.jsx
+Token submitted to API. Shows success or error.
+/password-reset
+pages/PasswordResetPage.jsx
+Request reset email
+/password-reset/:token
+pages/PasswordResetConfirmPage.jsx
+Enter new password
+*
+pages/NotFoundPage.jsx
+404 with link back to dashboard
+
+6.2 Student Routes  (role: STUDENT)
+Path
+Component
+Description
+/dashboard
+pages/student/StudentDashboard.jsx
+Welcome, upcoming bookings, recommendations strip
+/facilities
+pages/student/FacilityBrowserPage.jsx
+Filterable grid of all active facilities
+/facilities/:id
+pages/student/FacilityDetailPage.jsx
+Facility info, ratings, availability calendar
+/facilities/:id/book
+pages/student/BookingPage.jsx
+Step flow: pick date → pick slot → confirm
+/bookings
+pages/student/MyBookingsPage.jsx
+Upcoming + past bookings with status badges
+/bookings/:id
+pages/student/BookingDetailPage.jsx
+Full detail: reference, slot, check-in button, QR
+/waitlist
+pages/student/MyWaitlistPage.jsx
+Active waitlist entries with queue positions
+/notifications
+pages/student/NotificationsPage.jsx
+Full notification history with read/unread toggle
+/profile
+pages/student/ProfilePage.jsx
+Edit name, profile picture, change password
+/feedback/:bookingId
+pages/student/FeedbackPage.jsx
+Post-use rating form (only after completion)
+
+6.3 Manager Routes  (role: MANAGER)
+Path
+Component
+Description
+/manager/dashboard
+pages/manager/ManagerDashboard.jsx
+KPI tiles, today's bookings count, pending approvals count
+/manager/facilities
+pages/manager/ManagerFacilitiesPage.jsx
+List of own facilities with utilization indicators
+/manager/facilities/:id
+pages/manager/FacilityManagePage.jsx
+Edit facility details, amenities, operating hours
+/manager/facilities/:id/slots
+pages/manager/SlotManagerPage.jsx
+Month calendar view — click to block/unblock slots
+/manager/facilities/:id/generate-slots
+pages/manager/GenerateSlotsPage.jsx
+Date range picker → generate slot rows
+/manager/bookings
+pages/manager/PendingBookingsPage.jsx
+Pending approval queue — approve or reject with note
+/manager/analytics/:id
+pages/manager/FacilityAnalyticsPage.jsx
+Daily usage chart, heatmap, ratings breakdown
+/manager/notifications
+pages/manager/NotificationsPage.jsx
+Manager notification history
+/manager/profile
+pages/manager/ProfilePage.jsx
+Profile edit
+
+6.4 Admin Routes  (role: ADMIN)
+Path
+Component
+Description
+/admin/dashboard
+pages/admin/AdminDashboard.jsx
+Global KPI dashboard: total bookings, active users, no-show rate, cancellation rate
+/admin/users
+pages/admin/UserManagementPage.jsx
+Searchable, sortable user table. Ban, unban, view history.
+/admin/users/:id
+pages/admin/UserDetailPage.jsx
+Full user profile, booking history, no-show log
+/admin/users/pending-managers
+pages/admin/PendingManagersPage.jsx
+Manager approval queue — approve or reject
+/admin/facilities
+pages/admin/AllFacilitiesPage.jsx
+All facilities across all managers
+/admin/facilities/new
+pages/admin/CreateFacilityPage.jsx
+Create facility and assign manager
+/admin/facilities/:id
+pages/admin/FacilityDetailPage.jsx
+Full facility detail with override controls
+/admin/analytics
+pages/admin/GlobalAnalyticsPage.jsx
+System-wide charts: trends, facility ranking, student activity
+/admin/analytics/facility/:id
+pages/admin/FacilityAnalyticsAdminPage.jsx
+Per-facility deep-dive (same as manager view + override controls)
+/admin/rules
+pages/admin/BookingRulesPage.jsx
+Edit all global and facility-specific rules
+/admin/audit-log
+pages/admin/AuditLogPage.jsx
+Searchable, filterable system event log
+/admin/notifications
+pages/admin/NotificationsPage.jsx
+Admin notification history
+
+7. Frontend — State Management
+7.1 State Architecture
+UniReserve uses two layers of client-side state, deliberately separated by purpose:
+
+State Type
+Tool
+What Lives Here
+Server state
+TanStack React Query
+All API data: facilities, bookings, analytics. Cached, background-refetched, invalidated on mutation.
+Global client state
+Zustand
+Auth tokens, current user object, role. Persisted to sessionStorage.
+Local component state
+React useState / useReducer
+Form values, modal open/closed, selected filters, UI toggles.
+
+7.2 React Query Configuration
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30 * 1000,          // Data fresh for 30 seconds
+      cacheTime: 5 * 60 * 1000,      // Keep in cache for 5 min
+      retry: 1,                       // Retry once on failure
+      refetchOnWindowFocus: true,     // Re-fetch when tab regains focus
+    },
+  },
+});
+
+// Availability endpoint overrides: poll every 30s for live data
+useQuery(['availability', facilityId, date], fetchAvailability, {
+  refetchInterval: 30 * 1000,
+  staleTime: 0,
+});
+
+7.3 Key Query Keys Convention
+Query Key
+Data
+Invalidated By
+['facilities']
+All facilities list
+Facility created/deleted
+['facility', id]
+Single facility detail
+Facility updated
+['slots', facilityId, date]
+Slots for a facility+date
+Booking created/cancelled, slot blocked
+['availability', facilityId]
+Live slot availability
+Booking created/cancelled (+ 30s poll)
+['bookings']
+Own bookings list
+Booking created/cancelled/approved
+['booking', id]
+Single booking detail
+Booking status changes
+['waitlist']
+Own waitlist entries
+Waitlist joined/left/promoted
+['notifications']
+Notification list
+Any new notification received
+['unread-count']
+Unread notification badge
+Notification marked read
+['analytics', facilityId]
+Analytics charts data
+Nightly (manual refetch)
+
+8. Async Processing — Celery Architecture
+8.1 Celery Configuration
+# unireserve/celery.py
+app = Celery('unireserve')
+app.config_from_object('django.conf:settings', namespace='CELERY')
+app.autodiscover_tasks()
+
+# settings/base.py
+CELERY_BROKER_URL = env('REDIS_URL')          # redis://localhost:6379/0
+CELERY_RESULT_BACKEND = env('REDIS_URL')
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TIMEZONE = 'UTC'
+CELERY_TASK_TRACK_STARTED = True
+
+# Queues: tasks are routed to specific queues for isolation
+CELERY_TASK_ROUTES = {
+    'apps.notifications.tasks.email_tasks.*': {'queue': 'emails'},
+    'apps.notifications.tasks.system_tasks.*': {'queue': 'system'},
+    'apps.bookings.*':                         {'queue': 'bookings'},
+    'apps.analytics.*':                        {'queue': 'analytics'},
+}
+
+8.2 Celery Beat Schedule (Periodic Tasks)
+Task
+Schedule
+Queue
+Description
+detect_no_shows
+Every 5 minutes
+system
+Mark no-shows, apply penalties, trigger promotions
+send_slot_reminders
+Every 15 minutes
+emails
+Send reminder to students with slots starting in 60 min
+expire_waitlist_entries
+Daily 00:05 UTC
+system
+Set EXPIRED on waitlist entries past slot date
+generate_daily_snapshots
+Daily 00:10 UTC
+analytics
+Aggregate yesterday into analytics_daily_snapshots
+cleanup_used_tokens
+Daily 02:00 UTC
+system
+Delete expired email verification tokens
+unban_expired_users
+Every 30 minutes
+system
+Set is_banned=False where ban_until has passed
+
+8.3 Task: detect_no_shows
+Most critical system task. Runs every 5 minutes. Its correctness directly affects student trust and facility utilization.
+
+@shared_task(bind=True, max_retries=3)
+def detect_no_shows(self):
+    grace = get_rule_value('NO_SHOW_CHECKIN_GRACE_MINS', default=15)
+    cutoff = now() - timedelta(minutes=grace)
+
+    # Bookings where slot started > grace_mins ago and no check-in recorded
+    late_bookings = Booking.objects.filter(
+        status='CONFIRMED',
+        checked_in_at__isnull=True,
+        slot__slot_date=date.today(),
+        slot__start_time__lte=cutoff.time()
+    ).select_related('student', 'slot')
+
+    for booking in late_bookings:
+        with transaction.atomic():
+            booking.status = 'NO_SHOW'
+            booking.save(update_fields=['status', 'updated_at'])
+
+            student = booking.student
+            student.no_show_count = F('no_show_count') + 1
+            student.save(update_fields=['no_show_count'])
+            student.refresh_from_db()
+
+            # Check ban threshold
+            threshold = get_rule_value('NO_SHOW_BAN_THRESHOLD', default=3)
+            if student.no_show_count >= threshold:
+                ban_days = get_rule_value('NO_SHOW_BAN_DURATION_DAYS', default=7)
+                student.is_banned = True
+                student.ban_until = now() + timedelta(days=ban_days)
+                student.save(update_fields=['is_banned', 'ban_until'])
+
+        # Async: send email, promote waitlist
+        send_no_show_email.delay(booking.id)
+        promote_waitlist_on_cancel.delay(booking.slot_id)
+
+9. Security Architecture
+9.1 Authentication Flow
+Step
+Detail
+Password hashing
+Argon2id (Django's default hasher). Work factor configurable via PASSWORD_HASHERS setting.
+JWT access token
+HS256, 15-minute lifetime. Payload: {user_id, role, email, is_banned, exp, iat}. Short-lived so role changes propagate quickly.
+JWT refresh token
+7-day lifetime. Stored as httpOnly cookie (not accessible to JS). Rotation on use — old token blacklisted in DB.
+Refresh token blacklist
+Django's simplejwt outstanding token table. On logout, refresh token is blacklisted immediately.
+Token rotation
+Each /token/refresh/ call issues a new refresh token and invalidates the old. Prevents token theft replay.
+
+9.2 Permission Classes (DRF)
+# apps/core/permissions.py
+
+class IsStudent(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.role == 'STUDENT'
+
+class IsManager(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.role in ('MANAGER', 'ADMIN')
+
+class IsAdmin(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.role == 'ADMIN'
+
+class IsOwnerOrAdmin(BasePermission):
+    def has_object_permission(self, request, view, obj):
+        return obj.student_id == request.user.id or request.user.role == 'ADMIN'
+
+class IsNotBanned(BasePermission):
+    """Applied on all booking-write endpoints"""
+    def has_permission(self, request, view):
+        u = request.user
+        if u.is_banned:
+            if u.ban_until and u.ban_until < now():
+                # Auto-unban — ban expired
+                u.is_banned = False
+                u.save(update_fields=['is_banned'])
+                return True
+            return False
+        return True
+
+9.3 Security Settings (production.py)
+Setting
+Value
+Purpose
+SECURE_SSL_REDIRECT
+True
+Force HTTPS for all requests
+SESSION_COOKIE_SECURE
+True
+Cookies only over HTTPS
+CSRF_COOKIE_SECURE
+True
+
+SECURE_HSTS_SECONDS
+31536000
+HSTS: 1 year
+SECURE_HSTS_INCLUDE_SUBDOMAINS
+True
+
+CORS_ALLOWED_ORIGINS
+[frontend URL]
+Whitelist only the React app origin
+CORS_ALLOW_CREDENTIALS
+True
+Allow httpOnly cookie (refresh token)
+X_FRAME_OPTIONS
+DENY
+Prevent clickjacking
+
+10. Environment Variables & Configuration
+10.1 Backend .env Variables
+Variable
+Example Value
+Description
+SECRET_KEY
+django-insecure-...
+Django secret key — use long random string in prod
+DEBUG
+True / False
+
+ALLOWED_HOSTS
+localhost,127.0.0.1
+Comma-separated
+DB_HOST
+localhost
+
+DB_PORT
+3306
+
+DB_NAME
+unireserve
+
+DB_USER
+dbuser
+
+DB_PASSWORD
+secret
+
+REDIS_URL
+redis://localhost:6379/0
+Celery broker + result backend
+EMAIL_HOST
+smtp.gmail.com
+
+EMAIL_PORT
+587
+
+EMAIL_HOST_USER
+noreply@uni.edu
+
+EMAIL_HOST_PASSWORD
+...
+App password or SendGrid key
+DEFAULT_FROM_EMAIL
+UniReserve <noreply@uni.edu>
+
+FRONTEND_URL
+http://localhost:5173
+Used in email verification links
+JWT_ACCESS_LIFETIME_MINS
+15
+
+JWT_REFRESH_LIFETIME_DAYS
+7
+
+DJANGO_SETTINGS_MODULE
+unireserve.settings.development
+Switch to .production in prod
+
+10.2 Frontend .env Variables
+Variable
+Example Value
+Description
+VITE_API_BASE_URL
+http://localhost:8000/api/v1
+Django API base — change for production
+VITE_APP_NAME
+UniReserve
+Shown in page titles and emails
+VITE_POLLING_INTERVAL_MS
+30000
+Availability polling interval
+
+10.3 Django Apps in INSTALLED_APPS
+INSTALLED_APPS = [
+    # Django built-ins
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.sessions',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+
+    # Third-party
+    'rest_framework',
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
+    'corsheaders',
+    'django_filters',
+    'django_celery_beat',
+    'drf_spectacular',      # OpenAPI 3.0 auto-docs at /api/schema/
+
+    # Project apps
+    'apps.core',
+    'apps.accounts',
+    'apps.facilities',
+    'apps.bookings',
+    'apps.notifications',
+    'apps.analytics',
+]
+
+11. Critical Data Flows
+11.1 Booking Creation — Step-by-Step
+Step
+Layer
+Action
+Failure Response
+1
+DRF Serializer
+Validate request body: slot_id exists, group_members are valid UUIDs
+400 VALIDATION_ERROR
+2
+IsNotBanned permission
+Check student.is_banned — auto-unban if ban_until passed
+403 ACCOUNT_BANNED
+3
+rules_service
+Load BookingRule for facility (or global fallback)
+—
+4
+rules_service
+Check MAX_BOOKINGS_PER_DAY: count today's student bookings
+422 BOOKING_RULE_VIOLATED
+5
+rules_service
+Check MAX_HOURS_PER_WEEK: sum durations this week
+422 BOOKING_RULE_VIOLATED
+6
+rules_service
+Check MIN_ADVANCE_BOOKING_MINS: slot_start - now > threshold
+422 BOOKING_RULE_VIOLATED
+7
+rules_service
+Check group_size >= facility.min_group_size
+422 INVALID_GROUP_SIZE
+8
+booking_service
+SELECT ... FOR UPDATE on FacilitySlot row (row-level lock)
+—
+9
+booking_service
+Check available_capacity - booked_count > 0
+409 SLOT_FULL (offer waitlist)
+10
+booking_service
+Check no existing active booking for (student, slot)
+409 ALREADY_BOOKED
+11
+booking_service (atomic)
+INSERT Booking row, UPDATE slot.booked_count += 1
+500 on DB error (rollback)
+12
+Celery
+Dispatch send_booking_confirmation_email.delay(booking.id)
+(async — does not block response)
+13
+Celery
+Dispatch create_notification.delay(user_id, type, booking_id)
+(async)
+14
+View
+Return 201 with BookingDetailSerializer data
+—
+
+11.2 Waitlist Promotion Flow
+	•	Student A cancels booking. cancellation_service.cancel() called.
+	•	atomic: booking.status = CANCELLED, booking.cancelled_at = now().
+	•	atomic: FacilitySlot.booked_count -= 1.
+	•	Django signal post_save fires → dispatches promote_waitlist_on_cancel.delay(slot_id).
+	•	Celery task: SELECT from waitlist WHERE slot_id=X AND status=WAITING ORDER BY position ASC LIMIT 1.
+	•	If entry found: call booking_service.create() for that student (runs full validation pipeline again).
+	•	If booking succeeds: update waitlist entry status = PROMOTED, promoted_at = now().
+	•	Dispatch send_waitlist_promotion_email.delay(student_id, booking_id).
+	•	Re-number remaining waitlist positions: UPDATE waitlist SET position = position - 1 WHERE slot_id=X AND status=WAITING.
+
+11.3 JWT Token Lifecycle
+Event
+Access Token
+Refresh Token
+DB Effect
+Login
+Issued (15 min)
+Issued (7 days)
+OutstandingToken record created
+API request
+Sent in Authorization header
+Not sent
+None
+Access token expires
+401 returned
+Sent via httpOnly cookie
+None
+Token refresh
+New token issued
+New token issued (old blacklisted)
+BlacklistedToken record created
+Logout
+Discarded client-side
+Sent to /logout/ endpoint
+BlacklistedToken record created
+Role change by admin
+Next refresh picks up new role
+—
+Old tokens remain valid until expiry
+
+12. Testing Strategy
+12.1 Backend Tests
+Use pytest-django. Test files mirror the app structure. Coverage target: 80%+ on services/ and views/. Use factory_boy for test data to avoid fixture hell.
+
+Test File
+What It Tests
+accounts/tests/test_registration.py
+Student + manager registration, email verification flow, duplicate email rejection, invalid domain rejection
+accounts/tests/test_auth.py
+Login success/failure, JWT token contents, refresh flow, logout blacklist, password reset end-to-end
+bookings/tests/test_booking_creation.py
+All 14 validation steps, concurrent booking race condition (threads), overbooking prevention
+bookings/tests/test_booking_rules.py
+MAX_BOOKINGS_PER_DAY, MAX_HOURS_PER_WEEK, MIN_ADVANCE, facility-specific overrides
+bookings/tests/test_waitlist.py
+Join full slot, promotion on cancel, position re-numbering, expiry on past-date slots
+bookings/tests/test_cancellation.py
+Within window, outside window, admin override, group booking cancel
+facilities/tests/test_slot_generation.py
+Correct slot count for date range, skip blocked days, no duplicate generation
+analytics/tests/test_recommendations.py
+Cold start (< 5 bookings), normal flow, preference boosting, already-booked slot exclusion
+notifications/tests/test_dispatch.py
+Celery tasks queued correctly, email templates render, notification record created
+
+12.2 Frontend Tests
+Tool
+What It Covers
+Vitest
+Unit tests for utility functions: availability color logic, date helpers, booking rule validators
+React Testing Library
+Component tests: forms submit correctly, error states display, role-based rendering
+MSW (Mock Service Worker)
+API mocking for integration tests — no real network calls in tests
+Playwright (E2E)
+Critical paths: student registers → verifies email → books → cancels. Manager approves booking.
+
+13. Deployment Architecture
+13.1 Local Development Setup
+# 1. Clone repo, create virtual environment
+git clone <repo> && cd unireserve-backend
+python -m venv venv && source venv/bin/activate
+pip install -r requirements/development.txt
+
+# 2. Start MySQL and Redis via Docker
+docker-compose up -d db redis
+
+# 3. Run migrations and seed data
+python manage.py migrate
+python manage.py runscript seed_data
+
+# 4. Create superuser
+python manage.py createsuperuser
+
+# 5. Start Django
+python manage.py runserver
+
+# 6. Start Celery worker (separate terminal)
+celery -A unireserve worker -l info -Q emails,system,bookings,analytics
+
+# 7. Start Celery beat (separate terminal)
+celery -A unireserve beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+
+# 8. Start React frontend
+cd ../unireserve-frontend && npm install && npm run dev
+
+13.2 docker-compose.yml Services
+Service
+Image
+Port
+Purpose
+db
+mysql:8.0
+3306
+MySQL database
+redis
+redis:7-alpine
+6379
+Celery broker + result backend
+django
+Custom Dockerfile
+8000
+Django + Gunicorn (prod only)
+celery_worker
+Same as django
+—
+Celery worker process
+celery_beat
+Same as django
+—
+Periodic task scheduler
+frontend
+node:18-alpine
+5173
+Vite dev server (dev only)
+
+13.3 Production Checklist
+	•	Set DEBUG=False, DJANGO_SETTINGS_MODULE=unireserve.settings.production
+	•	Generate strong SECRET_KEY (50+ random chars)
+	•	Set ALLOWED_HOSTS to actual domain
+	•	Configure CORS_ALLOWED_ORIGINS to frontend domain only
+	•	Use Gunicorn with at least 4 workers: gunicorn unireserve.wsgi -w 4 -b 0.0.0.0:8000
+	•	Run collectstatic and serve static files via Nginx / CDN
+	•	Enable database connection pooling (django-db-geventpool or PgBouncer equivalent for MySQL)
+	•	Set up Sentry for error tracking in both Django and React
+	•	Configure Celery worker with --concurrency=4 (match CPU cores)
+	•	Enable MySQL slow query log for query performance monitoring
+
+End of Document — UniReserve System Architecture Document v1.0

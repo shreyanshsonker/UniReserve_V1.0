@@ -1,0 +1,183 @@
+@config "../tailwind.config.js";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface: #060e20;
+  --surface-low: #091328;
+  --surface-high: #141f38;
+  --primary: #4f46e5;
+  --secondary: #a855f7;
+  --tertiary: #22d3ee;
+  --text-strong: #f3f4f6;
+  --text-muted: #9ca3af;
+  --border-soft: rgba(255, 255, 255, 0.1);
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    background-color: var(--surface);
+    color: var(--text-strong);
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    color: #ffffff;
+    font-family: 'Manrope', sans-serif;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+  }
+
+  ::selection {
+    background: rgba(79, 70, 229, 0.3);
+  }
+}
+
+@layer components {
+  .glass-panel {
+    background: rgba(20, 31, 56, 0.6);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 1.5rem;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+  }
+
+  .glass-card {
+    background: rgba(20, 31, 56, 0.4);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 1rem;
+    transition: background-color 0.3s ease, border-color 0.3s ease, transform 0.3s ease;
+  }
+
+  .glass-card:hover {
+    background: rgba(20, 31, 56, 0.6);
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .gradient-text {
+    background-image: linear-gradient(135deg, var(--primary), #818cf8, var(--secondary));
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+  }
+
+  .input-field {
+    width: 100%;
+    background: var(--surface-low);
+    border: 1px solid var(--border-soft);
+    border-radius: 0.75rem;
+    color: #ffffff;
+    padding: 0.875rem 1rem;
+    transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .input-field::placeholder {
+    color: #6b7280;
+  }
+
+  .input-field:focus {
+    background: rgba(6, 14, 32, 0.8);
+    border-color: rgba(79, 70, 229, 0.5);
+    box-shadow: 0 0 0 1px rgba(79, 70, 229, 0.5);
+    outline: none;
+  }
+
+  .primary-button {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    border: 0;
+    border-radius: 9999px;
+    background-image: linear-gradient(90deg, var(--primary), var(--secondary));
+    box-shadow: 0 10px 30px rgba(79, 70, 229, 0.2);
+    color: #ffffff;
+    cursor: pointer;
+    font-weight: 500;
+    padding: 0.875rem 1rem;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+  }
+
+  .primary-button:hover {
+    transform: scale(1.02);
+  }
+
+  .primary-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.65;
+    transform: none;
+  }
+
+  .primary-button::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(255, 255, 255, 0.2);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+
+  .primary-button:hover::after {
+    opacity: 1;
+  }
+
+  .secondary-button {
+    width: 100%;
+    border: 1px solid var(--border-soft);
+    border-radius: 9999px;
+    background: rgba(255, 255, 255, 0.05);
+    color: #ffffff;
+    cursor: pointer;
+    font-weight: 500;
+    padding: 0.875rem 1rem;
+    transition: background-color 0.2s ease;
+  }
+
+  .secondary-button:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .chip-selected {
+    background: var(--primary);
+    box-shadow: 0 10px 25px rgba(79, 70, 229, 0.3);
+    color: #ffffff;
+    font-weight: 500;
+  }
+
+  .chip-outline {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #d1d5db;
+    transition: border-color 0.2s ease, color 0.2s ease;
+  }
+
+  .chip-outline:hover {
+    border-color: rgba(255, 255, 255, 0.4);
+    color: #ffffff;
+  }
+
+  .scrollbar-none {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.dynamic-bg {
+  background-image: 
+    radial-gradient(circle at 15% 50%, rgba(79, 70, 229, 0.15), transparent 25%),
+    radial-gradient(circle at 85% 30%, rgba(168, 85, 247, 0.15), transparent 25%);
+}
