@@ -1,7 +1,6 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import api from '../api/axios';
-
-const AuthContext = createContext();
+import AuthContext from './AuthContextObject';
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
@@ -42,12 +41,21 @@ export const AuthProvider = ({ children }) => {
     return userData;
   };
 
-  const logout = () => {
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
-    localStorage.removeItem('user_role');
-    setUser(null);
-    window.location.href = '/login';
+  const logout = async () => {
+    try {
+      const refreshToken = localStorage.getItem('refresh_token');
+      if (refreshToken) {
+        await api.post('/auth/logout/', { refresh: refreshToken });
+      }
+    } catch (error) {
+      console.error('Logout API call failed:', error);
+    } finally {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      localStorage.removeItem('user_role');
+      setUser(null);
+      window.location.href = '/login';
+    }
   };
 
   return (
@@ -55,12 +63,4 @@ export const AuthProvider = ({ children }) => {
       {children}
     </AuthContext.Provider>
   );
-};
-
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
 };
