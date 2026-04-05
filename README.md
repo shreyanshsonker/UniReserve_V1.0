@@ -333,6 +333,537 @@ http://localhost:8000/api
 - `Waitlist`
   - user, slot, FIFO queue order
 
+## Database Schema
+
+The application-level database schema currently revolves around six core tables created by the UniReserve apps. Django also creates framework-managed tables for migrations, permissions, sessions, token blacklisting, and admin logs, but the schema below focuses on the business data used directly by the product.
+
+### Schema inventory
+
+| Physical table | Django model | Purpose |
+|---|---|---|
+| `users` | `accounts.CustomUser` | Stores students, managers, and admins |
+| `facilities_facility` | `facilities.Facility` | Stores bookable facilities |
+| `facilities_facilityslot` | `facilities.FacilitySlot` | Stores dated time slots for each facility |
+| `bookings_booking` | `bookings.Booking` | Stores booking requests, approvals, attendance, cancellations, and no-shows |
+| `bookings_bookingrule` | `bookings.BookingRule` | Stores configurable operational limits such as daily or weekly quotas |
+| `bookings_waitlist` | `bookings.Waitlist` | Stores FIFO waitlist entries for full slots |
+
+### Important schema notes
+
+- `notifications` currently has no persistent database model. Notification behavior is email-driven.
+- `users` is a custom Django auth table and replaces the default user table for application auth.
+- `bookings_booking` originally had a `(user, slot)` unique constraint, but migration `0003_remove_booking_unique_constraint.py` removes it. Duplicate prevention now happens in the service layer.
+- `facilities_facilityslot` enforces one row per `(facility, date, start_time, end_time)`.
+- `bookings_waitlist` enforces one row per `(user, slot)`.
+- Standard Django auth support relations such as groups, permissions, and framework tables are intentionally omitted from the ER diagram below to keep the business model readable.
+
+### Table: `users`
+
+Source model: `accounts.CustomUser`
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | bigint | PK | Auto-generated primary key |
+| `password` | varchar | required | Django password hash |
+| `last_login` | datetime | nullable | Django auth field |
+| `is_superuser` | boolean | default `false` | From `PermissionsMixin` |
+| `email` | varchar(255) | unique, required | Login identifier |
+| `name` | varchar(255) | required | Full name |
+| `role` | varchar(10) | default `student` | `student`, `manager`, `admin` |
+| `account_status` | varchar(10) | default `active` | `active`, `pending`, `rejected` |
+| `student_id` | varchar(50) | unique, nullable | Student-only field |
+| `department` | varchar(100) | default `''` | Shared profile metadata |
+| `year_of_study` | positive integer | nullable | Student-only field |
+| `employee_id` | varchar(50) | unique, nullable | Manager-only field |
+| `facility_responsible_for` | varchar(255) | default `''` | Manager profile context |
+| `is_active` | boolean | default `false` | Becomes true after verification/approval |
+| `is_staff` | boolean | default `false` | Django admin access support |
+| `no_show_count` | positive integer | default `0` | Used for enforcement |
+| `is_suspended` | boolean | default `false` | Blocks booking access |
+| `suspended_until` | datetime | nullable | Suspension expiry |
+| `date_joined` | datetime | required | Account creation timestamp |
+
+Relationship summary:
+
+- One user can manage many facilities.
+- One user can create many bookings.
+- One user can join many waitlists.
+
+### Table: `facilities_facility`
+
+Source model: `facilities.Facility`
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | bigint | PK | Auto-generated primary key |
+| `name` | varchar(100) | required | Facility display name |
+| `type` | varchar(20) | required | Facility category |
+| `description` | text | blank allowed | User-facing description |
+| `location` | varchar(255) | required | Campus location |
+| `manager_id` | bigint | FK -> `users.id` | Owner/manager of the facility |
+| `capacity_per_slot` | positive integer | default `1` | Default intended seat count |
+| `is_active` | boolean | default `true` | Visibility flag |
+| `created_at` | datetime | auto_now_add | Creation timestamp |
+
+Relationship summary:
+
+- Each facility belongs to one manager.
+- Each facility has many slots.
+
+### Table: `facilities_facilityslot`
+
+Source model: `facilities.FacilitySlot`
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | bigint | PK | Auto-generated primary key |
+| `facility_id` | bigint | FK -> `facilities_facility.id` | Parent facility |
+| `date` | date | required | Slot date |
+| `start_time` | time | required | Slot start |
+| `end_time` | time | required | Slot end |
+| `capacity` | positive integer | required | Actual seat capacity for the slot |
+| `current_bookings` | positive integer | default `0` | Synchronized by booking service |
+| `is_blocked` | boolean | default `false` | Maintenance/manual lock flag |
+| `created_at` | datetime | auto_now_add | Creation timestamp |
+
+Constraints:
+
+- Unique together: `(facility_id, date, start_time, end_time)`
+
+Derived business fields exposed through serializers:
+
+- `availability_status`
+- `slots_remaining`
+
+Relationship summary:
+
+- Each slot belongs to one facility.
+- Each slot can have many bookings.
+- Each slot can have many waitlist entries.
+
+### Table: `bookings_booking`
+
+Source model: `bookings.Booking`
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | bigint | PK | Auto-generated primary key |
+| `user_id` | bigint | FK -> `users.id` | Booking owner |
+| `slot_id` | bigint | FK -> `facilities_facilityslot.id` | Reserved slot |
+| `status` | varchar(20) | default `active` | `active`, `pending_approval`, `cancelled`, `no_show`, `attended` |
+| `created_at` | datetime | auto_now_add | Request timestamp |
+| `updated_at` | datetime | auto_now | Last state change |
+| `checked_in_at` | datetime | nullable | Timestamp of successful check-in |
+| `manager_note` | text | blank allowed | Approval/rejection note |
+
+Schema note:
+
+- There is no final DB-level uniqueness constraint on `(user_id, slot_id)` because migration `0003` removes it. Current duplicate prevention is enforced in application logic inside `BookingService`.
+
+Relationship summary:
+
+- Each booking belongs to one user.
+- Each booking belongs to one facility slot.
+
+### Table: `bookings_bookingrule`
+
+Source model: `bookings.BookingRule`
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | bigint | PK | Auto-generated primary key |
+| `name` | varchar(100) | required | Display label |
+| `rule_key` | slug/varchar(50) | unique | Lookup key used in service layer |
+| `value` | integer | required | Numeric rule value |
+| `description` | text | blank allowed | Human-readable explanation |
+
+Examples of rules referenced by the service layer:
+
+- `max_per_day`
+- `max_hours_per_week`
+
+### Table: `bookings_waitlist`
+
+Source model: `bookings.Waitlist`
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | bigint | PK | Auto-generated primary key |
+| `user_id` | bigint | FK -> `users.id` | Waitlisted user |
+| `slot_id` | bigint | FK -> `facilities_facilityslot.id` | Full slot |
+| `created_at` | datetime | auto_now_add | FIFO position anchor |
+
+Constraints:
+
+- Unique together: `(user_id, slot_id)`
+
+Relationship summary:
+
+- Each waitlist entry belongs to one user.
+- Each waitlist entry belongs to one slot.
+- Ordering is chronological by `created_at`.
+
+## ER Diagram
+
+The ER diagram below reflects the application-owned domain model and its most important relationships.
+
+```mermaid
+erDiagram
+    USERS {
+        bigint id PK
+        string email UK
+        string name
+        string role
+        string account_status
+        string student_id UK
+        string employee_id UK
+        int year_of_study
+        string department
+        string facility_responsible_for
+        boolean is_active
+        boolean is_staff
+        boolean is_superuser
+        int no_show_count
+        boolean is_suspended
+        datetime suspended_until
+        datetime date_joined
+    }
+
+    FACILITY {
+        bigint id PK
+        string name
+        string type
+        text description
+        string location
+        bigint manager_id FK
+        int capacity_per_slot
+        boolean is_active
+        datetime created_at
+    }
+
+    FACILITY_SLOT {
+        bigint id PK
+        bigint facility_id FK
+        date date
+        time start_time
+        time end_time
+        int capacity
+        int current_bookings
+        boolean is_blocked
+        datetime created_at
+    }
+
+    BOOKING {
+        bigint id PK
+        bigint user_id FK
+        bigint slot_id FK
+        string status
+        datetime created_at
+        datetime updated_at
+        datetime checked_in_at
+        text manager_note
+    }
+
+    BOOKING_RULE {
+        bigint id PK
+        string name
+        string rule_key UK
+        int value
+        text description
+    }
+
+    WAITLIST {
+        bigint id PK
+        bigint user_id FK
+        bigint slot_id FK
+        datetime created_at
+    }
+
+    USERS ||--o{ FACILITY : manages
+    FACILITY ||--o{ FACILITY_SLOT : has
+    USERS ||--o{ BOOKING : creates
+    FACILITY_SLOT ||--o{ BOOKING : receives
+    USERS ||--o{ WAITLIST : joins
+    FACILITY_SLOT ||--o{ WAITLIST : queues
+```
+
+## Data Flow Diagrams
+
+### DFD Level 0: System Context
+
+This is the highest-level view of UniReserve as one system interacting with external actors and supporting services.
+
+```mermaid
+flowchart LR
+    student[Student]
+    manager[Facility Manager]
+    admin[Admin]
+    system([UniReserve System])
+    db[(MySQL Database)]
+    email[[Email Backend]]
+
+    student -->|register, verify, login, browse, request booking, join waitlist, check in| system
+    system -->|pages, booking statuses, recommendations, confirmations| student
+
+    manager -->|register, login, create facilities, create slots, approve/reject requests, review analytics| system
+    system -->|manager dashboard, approval queue, analytics views| manager
+
+    admin -->|login, approve managers, manage users, view analytics| system
+    system -->|admin analytics and control responses| admin
+
+    system -->|read and write domain data| db
+    db -->|users, facilities, slots, bookings, waitlists, rules| system
+
+    system -->|verification, approval, rejection, cancellation, no-show, suspension emails| email
+    email -->|email notifications| student
+    email -->|status and booking alerts| manager
+```
+
+### DFD Level 1: Internal Service Decomposition
+
+This diagram breaks the system into the main application processes present in the current codebase.
+
+```mermaid
+flowchart LR
+    student[Student]
+    manager[Facility Manager]
+    admin[Admin]
+
+    subgraph client[Client Layer]
+        frontend[React Frontend]
+    end
+
+    subgraph backend[Django Backend]
+        auth[Auth and Account Service]
+        facility[Facility and Slot Service]
+        booking[Booking, Waitlist, and Check-In Service]
+        analytics[Analytics and Recommendation Service]
+        notify[Notification Service]
+    end
+
+    users[(Users)]
+    resources[(Facilities and Slots)]
+    bookingstore[(Bookings, Waitlists, Rules)]
+    email[[Email Backend]]
+
+    student --> frontend
+    manager --> frontend
+    admin --> frontend
+
+    frontend --> auth
+    frontend --> facility
+    frontend --> booking
+    frontend --> analytics
+
+    auth <--> users
+    facility <--> resources
+    booking <--> users
+    booking <--> resources
+    booking <--> bookingstore
+    analytics <--> resources
+    analytics <--> bookingstore
+    analytics <--> users
+
+    auth --> notify
+    booking --> notify
+    notify --> email
+```
+
+## System Flowcharts
+
+### Overall system workflow
+
+This flowchart shows the main operational branches across all three user roles.
+
+```mermaid
+flowchart TD
+    start([User opens UniReserve])
+    auth{Existing account?}
+    register[Register]
+    login[Login]
+    role{Role after authentication}
+
+    studentdash[Student dashboard]
+    managerdash[Manager dashboard]
+    admindash[Admin dashboard]
+
+    studentactions[Browse facilities, request bookings, join waitlist, manage bookings, check in]
+    manageractions[Create facilities, add slots, review approvals, monitor analytics]
+    adminactions[Approve managers, manage users, view system analytics]
+
+    start --> auth
+    auth -->|No| register
+    auth -->|Yes| login
+    register --> login
+    login --> role
+
+    role -->|Student| studentdash
+    role -->|Manager| managerdash
+    role -->|Admin| admindash
+
+    studentdash --> studentactions
+    managerdash --> manageractions
+    admindash --> adminactions
+```
+
+### Authentication, verification, and role routing flow
+
+```mermaid
+flowchart TD
+    open([User starts auth flow])
+    choice{Login or register?}
+
+    studentreg[Student registration form]
+    managerreg[Manager registration form]
+    login[Login form]
+
+    studentcreate[Create inactive student account]
+    sendverify[Send email verification link]
+    verify{Verification token valid?}
+    activatestudent[Activate student account]
+
+    managercreate[Create inactive manager account with pending status]
+    pendingreview[Await admin approval]
+    managerdecision{Admin approves?}
+    activemanager[Activate manager account]
+    rejectmanager[Keep account rejected/inactive]
+
+    credentialcheck{Credentials valid and account active?}
+    issuetokens[Issue JWT access and refresh tokens]
+    rolecheck{Role}
+    studentroute[Route to /dashboard]
+    managerroute[Route to /manager/dashboard]
+    adminroute[Route to /admin/dashboard]
+    deny[Show auth error]
+
+    open --> choice
+    choice -->|Register as student| studentreg
+    choice -->|Register as manager| managerreg
+    choice -->|Login| login
+
+    studentreg --> studentcreate --> sendverify --> verify
+    verify -->|Yes| activatestudent --> login
+    verify -->|No| deny
+
+    managerreg --> managercreate --> pendingreview --> managerdecision
+    managerdecision -->|Yes| activemanager --> login
+    managerdecision -->|No| rejectmanager --> deny
+
+    login --> credentialcheck
+    credentialcheck -->|Yes| issuetokens --> rolecheck
+    credentialcheck -->|No| deny
+
+    rolecheck -->|Student| studentroute
+    rolecheck -->|Manager| managerroute
+    rolecheck -->|Admin| adminroute
+```
+
+### Booking, waitlist, and approval lifecycle
+
+```mermaid
+flowchart TD
+    select([Student selects facility slot])
+    blocked{Slot blocked?}
+    full{Slot full?}
+    unavailable[Show slot as unavailable]
+    openmodal[Open booking confirmation modal]
+    submitrequest[Create booking with pending_approval status]
+    managerqueue[Manager approval queue]
+    manageraction{Approve or reject?}
+    activebooking[Booking becomes active]
+    rejected[Booking marked cancelled with manager note]
+
+    joinwaitlist[Create waitlist entry]
+    seatopens{Seat becomes available later?}
+    remainqueued[Remain in waitlist queue]
+    autopromote[Promote first waitlist entry into pending_approval booking]
+
+    cancelwindow{Cancelled at least 30 minutes early?}
+    cancelled[Booking cancelled]
+    checkinwindow{Check-in attempted within allowed window?}
+    attended[Booking marked attended]
+    no_show[Booking later marked no_show]
+
+    select --> blocked
+    blocked -->|Yes| unavailable
+    blocked -->|No| full
+
+    full -->|No| openmodal --> submitrequest --> managerqueue --> manageraction
+    full -->|Yes| joinwaitlist --> seatopens
+
+    seatopens -->|No| remainqueued
+    seatopens -->|Yes| autopromote --> managerqueue
+
+    manageraction -->|Approve| activebooking
+    manageraction -->|Reject| rejected
+
+    activebooking --> cancelwindow
+    cancelwindow -->|Yes| cancelled
+    cancelwindow -->|No| checkinwindow
+
+    checkinwindow -->|Yes| attended
+    checkinwindow -->|No| no_show
+```
+
+### No-show enforcement and suspension lifecycle
+
+```mermaid
+flowchart TD
+    processor([Admin or system triggers no-show processor])
+    eligible{Booking still active and unchecked in after the allowed window?}
+    attended[Keep booking as attended]
+    marknoshow[Mark booking as no_show]
+    increment[Increment user's no_show_count]
+    threshold{no_show_count >= 3?}
+    warn[Send no-show warning email]
+    suspend[Suspend user for 7 days and set suspended_until]
+    blockfuture[Reject future booking attempts while suspended]
+    expiry{Suspension period expired?}
+    autosclear[Auto-clear suspension on next validation/login]
+    restored[User can book again]
+
+    processor --> eligible
+    eligible -->|No| attended
+    eligible -->|Yes| marknoshow --> increment --> threshold
+    threshold -->|No| warn
+    threshold -->|Yes| suspend --> blockfuture --> expiry
+    expiry -->|No| blockfuture
+    expiry -->|Yes| autosclear --> restored
+```
+
+### Analytics and recommendation flow
+
+```mermaid
+flowchart TD
+    bookings[(Bookings and statuses)]
+    slots[(Facility slots)]
+    users[(Users)]
+
+    recommendationengine[Recommendation service]
+    analyticsengine[Analytics views]
+
+    studentdashboard[Student dashboard cards]
+    manageranalytics[Manager analytics dashboard]
+    adminanalytics[Admin analytics dashboard]
+
+    bookings --> recommendationengine
+    slots --> recommendationengine
+    users --> recommendationengine
+    recommendationengine --> studentdashboard
+
+    bookings --> analyticsengine
+    slots --> analyticsengine
+    analyticsengine --> manageranalytics
+    analyticsengine --> adminanalytics
+```
+
+## How to Read the Diagrams
+
+- Use the schema tables when you need exact fields, keys, and constraints.
+- Use the ER diagram when you need relationship structure between entities.
+- Use the DFD diagrams when you need to understand how data moves across actors, services, and storage.
+- Use the flowcharts when you need to trace runtime behavior such as onboarding, booking approval, waitlisting, check-in, and enforcement.
+
 ## Local Development Setup on a New Device
 
 This section is the recommended first-run process for a completely new machine.
