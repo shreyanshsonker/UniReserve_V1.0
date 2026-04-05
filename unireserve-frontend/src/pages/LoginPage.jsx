@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/useAuth';
 import { notifySuccess, notifyError } from '../utils/notify';
-import { HiMail, HiLockClosed } from 'react-icons/hi';
+import { HiArrowRight, HiLockClosed, HiMail } from 'react-icons/hi';
+import AuthLayout from '../components/AuthLayout';
 
 const LoginPage = () => {
   const [email, setEmail] = useState('');
@@ -14,6 +15,29 @@ const LoginPage = () => {
   const location = useLocation();
 
   const from = location.state?.from?.pathname || '/';
+
+  const quickLinks = [
+    { to: '/register/student', label: 'Student Sign Up', variant: 'primary' },
+    { to: '/register/manager', label: 'Manager Sign Up' },
+  ];
+
+  const highlights = [
+    {
+      label: 'Unified access',
+      value: '1 sign-in',
+      copy: 'Students, managers, and admins all enter through the same secure flow.',
+    },
+    {
+      label: 'Live updates',
+      value: 'Real time',
+      copy: 'Bookings, waitlists, and approvals are ready as soon as you log in.',
+    },
+    {
+      label: 'Role aware',
+      value: 'Adaptive',
+      copy: 'The app routes you straight into the workspace that matches your role.',
+    },
+  ];
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -41,86 +65,67 @@ const LoginPage = () => {
   };
 
   return (
-    <div className="flex-center min-h-screen p-6">
-      <div className="card glass max-w-md w-full animate-fade-in">
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold mb-2">UniReserve</h1>
-          <p className="text-text-muted">University Facility Booking & Management</p>
-        </div>
-
-        <h2 className="text-xl font-semibold mb-6">Sign In</h2>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-1">
-            <label className="text-sm font-medium text-text-muted">Email Address</label>
-            <div className="relative">
-              <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-text-muted">
-                <HiMail className="h-5 w-5" />
-              </span>
-              <input
-                type="email"
-                required
-                className="pl-10"
-                placeholder="name@university.edu"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-sm font-medium text-text-muted">Password</label>
-            <div className="relative">
-              <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-text-muted">
-                <HiLockClosed className="h-5 w-5" />
-              </span>
-              <input
-                type="password"
-                required
-                className="pl-10"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="flex justify-end">
-            <Link to="/forgot-password" size="sm" className="text-sm">
-              Forgot password?
-            </Link>
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full flex justify-center py-3"
-          >
-            {loading ? 'Signing in...' : 'Sign In'}
-          </button>
-        </form>
-
-        <div className="mt-8 pt-6 border-t border-border space-y-4">
-          <p className="text-center text-sm text-text-muted">
-            New here? Register as a:
-          </p>
-          <div className="grid grid-cols-2 gap-4">
-            <Link
-              to="/register/student"
-              className="px-4 py-2 text-center rounded-lg border border-border hover:bg-slate-800 transition-colors text-sm font-medium"
-            >
-              Student
-            </Link>
-            <Link
-              to="/register/manager"
-              className="px-4 py-2 text-center rounded-lg border border-border hover:bg-slate-800 transition-colors text-sm font-medium"
-            >
-              Staff/Manager
-            </Link>
+    <AuthLayout
+      eyebrow="Secure campus access"
+      title="Sign in once and step back into your live workspace."
+      description="Access your dashboard, facility bookings, approvals, and analytics from one polished university operations platform."
+      quickLinks={quickLinks}
+      highlights={highlights}
+      cardEyebrow="Welcome back"
+      cardTitle="Sign In"
+      cardDescription="Use your registered university email and password to continue."
+      footnote="Student accounts go straight into booking, while manager accounts unlock control and analytics after approval."
+    >
+      <form onSubmit={handleSubmit} className="auth-form">
+        <div className="auth-field">
+          <label htmlFor="login-email">Email Address</label>
+          <div className="auth-field__control">
+            <span className="auth-field__icon">
+              <HiMail />
+            </span>
+            <input
+              id="login-email"
+              type="email"
+              required
+              placeholder="name@university.edu"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+            />
           </div>
         </div>
-      </div>
-    </div>
+
+        <div className="auth-field">
+          <label htmlFor="login-password">Password</label>
+          <div className="auth-field__control">
+            <span className="auth-field__icon">
+              <HiLockClosed />
+            </span>
+            <input
+              id="login-password"
+              type="password"
+              required
+              placeholder="••••••••"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </div>
+        </div>
+
+        <p className="auth-form__helper">
+          If you just registered, verify your email first before signing in.
+        </p>
+
+        <button type="submit" disabled={loading} className="auth-submit">
+          {loading ? 'Signing in...' : 'Sign In to UniReserve'}
+          {!loading && <HiArrowRight />}
+        </button>
+      </form>
+
+      <p className="auth-footer">
+        Need an account? <Link to="/register/student">Register as a student</Link> or{' '}
+        <Link to="/register/manager">apply as a manager</Link>.
+      </p>
+    </AuthLayout>
   );
 };
 

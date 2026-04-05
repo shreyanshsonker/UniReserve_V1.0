@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import api from '../api/axios';
 import { HiCheckCircle, HiXCircle, HiRefresh } from 'react-icons/hi';
+import AuthLayout from '../components/AuthLayout';
 
 const EmailVerifyPage = () => {
   const [searchParams] = useSearchParams();
@@ -31,45 +32,76 @@ const EmailVerifyPage = () => {
   }, [searchParams]);
 
   return (
-    <div className="flex-center min-h-screen p-6">
-      <div className="card glass max-w-md w-full text-center animate-fade-in">
+    <AuthLayout
+      eyebrow="Account verification"
+      title="Confirm your university email to activate the right workspace."
+      description="Verification keeps access tied to real campus identities and unlocks the correct booking or management experience."
+      quickLinks={[
+        { to: '/login', label: 'Back to Login', variant: 'primary' },
+        { to: '/register/student', label: 'Student Sign Up' },
+      ]}
+      highlights={[
+        {
+          label: 'Trust layer',
+          value: 'Verified',
+          copy: 'Email verification protects reservations and facility controls from misuse.',
+        },
+        {
+          label: 'Fast path',
+          value: '1 step',
+          copy: 'Most students can verify once and jump straight into booking right after.',
+        },
+        {
+          label: 'Role ready',
+          value: 'Secure',
+          copy: 'Manager and student journeys both begin with confirmed identity.',
+        },
+      ]}
+      cardEyebrow="Verification"
+      cardTitle="Email Status"
+      cardDescription="We’re checking your verification link now."
+    >
+      <div className="auth-status">
         {status === 'verifying' && (
-          <div className="space-y-4">
-            <HiRefresh className="h-16 w-16 text-primary mx-auto animate-spin" />
-            <h2 className="text-2xl font-bold">Verifying Email...</h2>
-            <p className="text-text-muted">Please wait while we confirm your university email.</p>
-          </div>
+          <>
+            <div className="auth-status__icon auth-status__icon--loading">
+              <HiRefresh className="animate-spin" />
+            </div>
+            <p className="auth-status__eyebrow">Checking link</p>
+            <h3 className="auth-card__title">Verifying Email...</h3>
+            <p className="auth-status__copy">Please wait while we confirm your university email.</p>
+          </>
         )}
 
         {status === 'success' && (
-          <div className="space-y-4">
-            <HiCheckCircle className="h-16 w-16 text-success mx-auto" />
-            <h2 className="text-2xl font-bold">Verified!</h2>
-            <p className="text-text-muted">{message}</p>
-            <div className="pt-4">
-              <Link to="/login">
-                <button className="w-full py-3">Sign In Now</button>
-              </Link>
+          <>
+            <div className="auth-status__icon auth-status__icon--success">
+              <HiCheckCircle />
             </div>
-          </div>
+            <p className="auth-status__eyebrow">Verified</p>
+            <h3 className="auth-card__title">You’re all set</h3>
+            <p className="auth-status__copy">{message}</p>
+            <Link to="/login" className="auth-submit">
+              Sign In Now
+            </Link>
+          </>
         )}
 
         {status === 'error' && (
-          <div className="space-y-4">
-            <HiXCircle className="h-16 w-16 text-danger mx-auto" />
-            <h2 className="text-2xl font-bold">Verification Failed</h2>
-            <p className="text-text-muted">{message}</p>
-            <div className="pt-4">
-              <Link to="/register/student">
-                <button className="w-full py-3 border border-border bg-transparent hover:bg-slate-800 transition-colors">
-                  Try Registering Again
-                </button>
-              </Link>
+          <>
+            <div className="auth-status__icon auth-status__icon--error">
+              <HiXCircle />
             </div>
-          </div>
+            <p className="auth-status__eyebrow">Verification issue</p>
+            <h3 className="auth-card__title">Verification Failed</h3>
+            <p className="auth-status__copy">{message}</p>
+            <Link to="/register/student" className="auth-submit">
+              Try Registering Again
+            </Link>
+          </>
         )}
       </div>
-    </div>
+    </AuthLayout>
   );
 };
 

@@ -2,7 +2,16 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../api/axios';
 import { notifySuccess, notifyError } from '../utils/notify';
-import { HiUser, HiMail, HiLockClosed, HiIdentification, HiAcademicCap, HiOfficeBuilding } from 'react-icons/hi';
+import {
+  HiAcademicCap,
+  HiArrowRight,
+  HiIdentification,
+  HiLockClosed,
+  HiMail,
+  HiOfficeBuilding,
+  HiUser,
+} from 'react-icons/hi';
+import AuthLayout from '../components/AuthLayout';
 
 const ManagerRegisterPage = () => {
   const [formData, setFormData] = useState({
@@ -16,6 +25,29 @@ const ManagerRegisterPage = () => {
   });
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+
+  const quickLinks = [
+    { to: '/login', label: 'Back to Login', variant: 'primary' },
+    { to: '/register/student', label: 'Student Sign Up' },
+  ];
+
+  const highlights = [
+    {
+      label: 'Operations view',
+      value: 'Approvals',
+      copy: 'Review student requests and respond with clear manager notes from one queue.',
+    },
+    {
+      label: 'Live control',
+      value: 'Publish slots',
+      copy: 'Create facilities, release schedules, and keep capacity up to date.',
+    },
+    {
+      label: 'Smarter planning',
+      value: 'Analytics',
+      copy: 'Use demand trends and attendance health to plan around campus behavior.',
+    },
+  ];
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -42,163 +74,167 @@ const ManagerRegisterPage = () => {
   };
 
   return (
-    <div className="flex justify-center items-center py-10 px-6 min-h-screen">
-      <div className="card glass max-w-lg w-full animate-fade-in shadow-2xl">
-        <div className="text-center mb-8">
-          <Link to="/login" className="text-2xl font-bold text-white hover:text-primary transition-colors">UniReserve</Link>
-          <h2 className="text-xl font-semibold mt-4">Staff Registration</h2>
-          <p className="text-text-muted mt-2">Apply for a Facility Manager account</p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-5">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-text-muted">Full Name</label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-text-muted">
-                  <HiUser className="h-5 w-5" />
-                </span>
-                <input
-                  name="name"
-                  type="text"
-                  required
-                  className="pl-10"
-                  placeholder="John Smith"
-                  value={formData.name}
-                  onChange={handleChange}
-                />
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-text-muted">Email Address</label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-text-muted">
-                  <HiMail className="h-5 w-5" />
-                </span>
-                <input
-                  name="email"
-                  type="email"
-                  required
-                  className="pl-10"
-                  placeholder="j.smith@univ.edu"
-                  value={formData.email}
-                  onChange={handleChange}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-text-muted">Employee ID</label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-text-muted">
-                  <HiIdentification className="h-5 w-5" />
-                </span>
-                <input
-                  name="employee_id"
-                  type="text"
-                  required
-                  className="pl-10"
-                  placeholder="EMP9876"
-                  value={formData.employee_id}
-                  onChange={handleChange}
-                />
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-text-muted">Department</label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-text-muted">
-                  <HiAcademicCap className="h-5 w-5" />
-                </span>
-                <input
-                  name="department"
-                  type="text"
-                  required
-                  className="pl-10"
-                  placeholder="Library Admin / IT"
-                  value={formData.department}
-                  onChange={handleChange}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-sm font-medium text-text-muted">Facility to Manage</label>
-            <div className="relative">
-              <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-text-muted">
-                <HiOfficeBuilding className="h-5 w-5" />
+    <AuthLayout
+      eyebrow="Manager onboarding"
+      title="Apply for facility control with a manager account built for operations."
+      description="Tell us who you are, which spaces you oversee, and we’ll route your application into the approval workflow."
+      quickLinks={quickLinks}
+      highlights={highlights}
+      cardEyebrow="Manager Access"
+      cardTitle="Apply for Manager Account"
+      cardDescription="This flow is for facility owners, lab coordinators, and campus operations staff."
+      footnote="Manager registrations are reviewed before full dashboard and analytics access is enabled."
+    >
+      <form onSubmit={handleSubmit} className="auth-form">
+        <div className="auth-form__grid">
+          <div className="auth-field">
+            <label htmlFor="manager-name">Full Name</label>
+            <div className="auth-field__control">
+              <span className="auth-field__icon">
+                <HiUser />
               </span>
               <input
-                name="facility_responsible_for"
+                id="manager-name"
+                name="name"
                 type="text"
                 required
-                className="pl-10"
-                placeholder="Main Library / CS Lab A"
-                value={formData.facility_responsible_for}
+                placeholder="John Smith"
+                value={formData.name}
                 onChange={handleChange}
               />
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-text-muted">Password</label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-text-muted">
-                  <HiLockClosed className="h-5 w-5" />
-                </span>
-                <input
-                  name="password"
-                  type="password"
-                  required
-                  minLength="8"
-                  className="pl-10"
-                  placeholder="••••••••"
-                  value={formData.password}
-                  onChange={handleChange}
-                />
-              </div>
+          <div className="auth-field">
+            <label htmlFor="manager-email">Email Address</label>
+            <div className="auth-field__control">
+              <span className="auth-field__icon">
+                <HiMail />
+              </span>
+              <input
+                id="manager-email"
+                name="email"
+                type="email"
+                required
+                placeholder="j.smith@univ.edu"
+                value={formData.email}
+                onChange={handleChange}
+              />
             </div>
+          </div>
+        </div>
 
-            <div className="space-y-1">
-              <label className="text-sm font-medium text-text-muted">Confirm Password</label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-text-muted">
-                  <HiLockClosed className="h-5 w-5" />
-                </span>
-                <input
-                  name="password_confirm"
-                  type="password"
-                  required
-                  minLength="8"
-                  className="pl-10"
-                  placeholder="••••••••"
-                  value={formData.password_confirm}
-                  onChange={handleChange}
-                />
-              </div>
+        <div className="auth-form__grid">
+          <div className="auth-field">
+            <label htmlFor="manager-id">Employee ID</label>
+            <div className="auth-field__control">
+              <span className="auth-field__icon">
+                <HiIdentification />
+              </span>
+              <input
+                id="manager-id"
+                name="employee_id"
+                type="text"
+                required
+                placeholder="EMP9876"
+                value={formData.employee_id}
+                onChange={handleChange}
+              />
             </div>
           </div>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full flex justify-center py-3 mt-6 shadow-lg"
-          >
-            {loading ? 'Submitting Application...' : 'Apply for Manager Role'}
-          </button>
-        </form>
+          <div className="auth-field">
+            <label htmlFor="manager-department">Department</label>
+            <div className="auth-field__control">
+              <span className="auth-field__icon">
+                <HiAcademicCap />
+              </span>
+              <input
+                id="manager-department"
+                name="department"
+                type="text"
+                required
+                placeholder="Library Admin / IT"
+                value={formData.department}
+                onChange={handleChange}
+              />
+            </div>
+          </div>
+        </div>
 
-        <p className="text-center text-sm text-text-muted mt-8">
-          Already have an account? <Link to="/login" className="text-primary font-semibold">Sign In</Link>
+        <div className="auth-field">
+          <label htmlFor="manager-facility">Facility to Manage</label>
+          <div className="auth-field__control">
+            <span className="auth-field__icon">
+              <HiOfficeBuilding />
+            </span>
+            <input
+              id="manager-facility"
+              name="facility_responsible_for"
+              type="text"
+              required
+              placeholder="Main Library / CS Lab A"
+              value={formData.facility_responsible_for}
+              onChange={handleChange}
+            />
+          </div>
+        </div>
+
+        <div className="auth-form__grid">
+          <div className="auth-field">
+            <label htmlFor="manager-password">Password</label>
+            <div className="auth-field__control">
+              <span className="auth-field__icon">
+                <HiLockClosed />
+              </span>
+              <input
+                id="manager-password"
+                name="password"
+                type="password"
+                required
+                minLength="8"
+                placeholder="••••••••"
+                value={formData.password}
+                onChange={handleChange}
+              />
+            </div>
+          </div>
+
+          <div className="auth-field">
+            <label htmlFor="manager-password-confirm">Confirm Password</label>
+            <div className="auth-field__control">
+              <span className="auth-field__icon">
+                <HiLockClosed />
+              </span>
+              <input
+                id="manager-password-confirm"
+                name="password_confirm"
+                type="password"
+                required
+                minLength="8"
+                placeholder="••••••••"
+                value={formData.password_confirm}
+                onChange={handleChange}
+              />
+            </div>
+          </div>
+        </div>
+
+        <p className="auth-form__helper">
+          Applications are reviewed by an administrator before manager controls and analytics are
+          unlocked.
         </p>
-      </div>
-    </div>
+
+        <button type="submit" disabled={loading} className="auth-submit">
+          {loading ? 'Submitting Application...' : 'Apply for Manager Role'}
+          {!loading && <HiArrowRight />}
+        </button>
+      </form>
+
+      <p className="auth-footer">
+        Already have an account? <Link to="/login">Sign in here</Link>.
+      </p>
+    </AuthLayout>
   );
 };
 
