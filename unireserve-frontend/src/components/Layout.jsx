@@ -21,7 +21,7 @@ const Layout = () => {
           <div className="app-footer__inner">
             <p>
               &copy; {new Date().getFullYear()} UniReserve · University facility booking and
-              management
+              management ~ Engineered by Shreyansh Sonker
             </p>
           </div>
         </footer>
